@@ -1,0 +1,2016 @@
+import sys
+import math
+import random
+import time
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QLabel,
+    QPushButton, QHBoxLayout, QVBoxLayout, QFrame,
+    QStackedLayout, QDialog, QDoubleSpinBox, QComboBox,
+    QStackedWidget, QSizePolicy, QTableWidget, QTableWidgetItem,
+    QHeaderView,
+)
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
+from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont
+
+
+SESSION_SECONDS = 30
+
+# 기준값: Apex 1.5 at 800 DPI
+# scale = (DPI × sens × yaw) / BASELINE
+BASELINE = 800 * 1.5 * 0.022   # ≈ 26.4
+
+# 게임별 yaw (도/카운트) — 마우스 1카운트당 회전 각도
+GAME_YAW = {
+    "Apex Legends":       0.022,
+    "Valorant":           0.07,
+    "CS2":                0.022,
+    "Overwatch 2":        0.0066,
+    "Fortnite":           0.5555,
+    "PUBG":               0.001054,
+    "Rainbow Six Siege":  0.00573,
+    "Call of Duty":       0.0066,
+    "Battlefield 2042":   0.001813,
+}
+
+# 게임별 감도 설정 (이름, 기본값, 최소, 최대, 단계)
+GAME_PRESETS = [
+    ("Apex Legends",      2.50,  0.10,  3.00, 0.10),
+    ("Valorant",          0.786, 0.001,10.00, 0.001),
+    ("CS2",               2.50,  0.10, 10.00, 0.05),
+    ("Overwatch 2",       8.33,  1.00,100.00, 0.01),
+    ("Fortnite",          0.099, 0.001, 1.00, 0.001),
+    ("PUBG",             52.00,  1.00,500.00, 1.00),
+    ("Rainbow Six Siege",10.00,  1.00,100.00, 1.00),
+    ("Call of Duty",      8.33,  1.00, 20.00, 0.01),
+    ("Battlefield 2042", 30.30,  1.00,100.00, 0.10),
+]
+
+
+class _ClickOverlay(QWidget):
+    """클릭하면 on_click 콜백을 호출하는 투명 오버레이"""
+    def __init__(self, parent=None, on_click=None):
+        super().__init__(parent)
+        self._on_click = on_click
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if self._on_click:
+            self._on_click()
+
+
+# ────────────────────────────────────────────
+#  결과 다이얼로그
+# ────────────────────────────────────────────
+class ResultDialog(QDialog):
+    def __init__(self, hit_rate, verdict, avg_err, max_err, osc_rate, sensitivity, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("측정 결과")
+        self.setFixedSize(460, 540)
+        self.setStyleSheet("background:#1e1e1e; color:#ffffff;")
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(36, 36, 36, 36)
+        root.setSpacing(0)
+
+        title = QLabel("측정 완료")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size:13px; color:#888; letter-spacing:3px;")
+        root.addWidget(title)
+        root.addSpacing(6)
+
+        sens_lbl = QLabel(f"Apex 감도  {sensitivity:.2f}  기준")
+        sens_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sens_lbl.setStyleSheet("font-size:11px; color:#555;")
+        root.addWidget(sens_lbl)
+        root.addSpacing(14)
+
+        colors = {"느림": "#4488ff", "빠름": "#ff4444", "적정": "#44cc77"}
+        v_color = colors.get(verdict, "#fff")
+        verdict_lbl = QLabel(verdict)
+        verdict_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        verdict_lbl.setStyleSheet(
+            f"font-size:72px; font-weight:bold; color:{v_color}; letter-spacing:4px;"
+        )
+        root.addWidget(verdict_lbl)
+
+        descs = {
+            "느림": "커서가 타겟을 자주 놓쳤습니다.\n감도를 조금 높여보세요.",
+            "빠름": "커서가 타겟을 자주 지나쳤습니다.\n감도를 조금 낮춰보세요.",
+            "적정": "커서가 타겟을 안정적으로 추적했습니다.\n현재 감도가 잘 맞습니다.",
+        }
+        desc_lbl = QLabel(descs.get(verdict, ""))
+        desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc_lbl.setStyleSheet("font-size:12px; color:#aaa;")
+        desc_lbl.setWordWrap(True)
+        root.addWidget(desc_lbl)
+        root.addSpacing(24)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#333;")
+        root.addWidget(sep)
+        root.addSpacing(18)
+
+        stats = [
+            ("명중률",    f"{hit_rate:.1f} %",  self._hit_color(hit_rate)),
+            ("평균 오차", f"{avg_err:.1f} px",  "#cccccc"),
+            ("최대 오차", f"{max_err:.1f} px",  "#cccccc"),
+            ("진동 비율", f"{osc_rate:.1f} %",  "#cccccc"),
+        ]
+        for label, value, color in stats:
+            row = QHBoxLayout()
+            k = QLabel(label)
+            k.setStyleSheet("font-size:13px; color:#888;")
+            v = QLabel(value)
+            v.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
+            v.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row.addWidget(k)
+            row.addStretch()
+            row.addWidget(v)
+            root.addLayout(row)
+            root.addSpacing(10)
+
+        root.addStretch()
+
+        btn_row = QHBoxLayout()
+        retry_btn = QPushButton("다시 측정")
+        retry_btn.setFixedHeight(42)
+        retry_btn.setStyleSheet("""
+            QPushButton { background:#333; color:#fff; border:1px solid #555;
+                          border-radius:6px; font-size:13px; }
+            QPushButton:hover { background:#444; }
+        """)
+        retry_btn.clicked.connect(self.reject)
+
+        close_btn = QPushButton("닫기")
+        close_btn.setFixedHeight(42)
+        close_btn.setStyleSheet("""
+            QPushButton { background:#cc2222; color:#fff; border:none;
+                          border-radius:6px; font-size:13px; font-weight:bold; }
+            QPushButton:hover { background:#ee4444; }
+        """)
+        close_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(retry_btn)
+        btn_row.addSpacing(12)
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
+
+    def _hit_color(self, rate):
+        if rate >= 60: return "#44cc77"
+        if rate >= 35: return "#ffaa22"
+        return "#ff4444"
+
+
+# ────────────────────────────────────────────
+#  트래킹 캔버스
+# ────────────────────────────────────────────
+class TrackingCanvas(QWidget):
+    TARGET_R = 16
+    SPEED    = 234
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+
+        self.active        = False
+        self._on_start     = None
+        self.sensitivity   = 1.50
+        self.game_yaw      = 0.022
+        self.dpi           = 800
+        self.tracking_mode = 1   # 1: 랜덤, 2: X축 왕복
+
+        self.target_pos      = QPointF(0, 0)
+        self._virtual_cursor = QPointF(0, 0)
+        self._last_raw_pos   = None
+
+        self.remaining = SESSION_SECONDS
+
+        self._total_frames = 0
+        self._hit_frames   = 0
+        self._errors       = []
+        self._prev_err_x   = 0.0
+        self._sign_changes = 0
+
+        self._dt = 1 / 60
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def set_sensitivity(self, val: float, yaw: float = None, dpi: float = None):
+        self.sensitivity = val
+        if yaw is not None:
+            self.game_yaw = yaw
+        if dpi is not None:
+            self.dpi = dpi
+
+    def _cursor_scale(self) -> float:
+        return (self.dpi * self.sensitivity * self.game_yaw) / BASELINE
+
+    def start(self):
+        self.active = True
+        self._total_frames = 0
+        self._hit_frames   = 0
+        self._errors       = []
+        self._prev_err_x   = 0.0
+        self._sign_changes = 0
+        self.remaining     = SESSION_SECONDS
+        self._last_raw_pos = None
+
+        cx = self.width()  / 2
+        cy = self.height() / 2
+        self.target_pos      = QPointF(cx, cy)
+        self._virtual_cursor = QPointF(cx, cy)
+
+        if self.tracking_mode == 2:
+            # X축 왕복: Y는 고정
+            self.move_dir = QPointF(random.choice([-1, 1]), 0)
+        else:
+            self.move_dir = QPointF(
+                random.choice([-1, 1]) * (0.5 + random.random() * 0.5),
+                random.choice([-1, 1]) * (0.5 + random.random() * 0.5),
+            )
+        self._normalize_dir()
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self._timer.start(int(self._dt * 1000))
+
+    def stop(self):
+        self.active = False
+        self._timer.stop()
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._last_raw_pos = None
+        self.update()
+
+    def start_resume(self):
+        self.active = True
+        self._last_raw_pos = None
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self._timer.start(int(self._dt * 1000))
+
+    def _normalize_dir(self):
+        l = math.sqrt(self.move_dir.x() ** 2 + self.move_dir.y() ** 2)
+        if l > 0:
+            self.move_dir = QPointF(self.move_dir.x() / l, self.move_dir.y() / l)
+
+    def _tick(self):
+        if not self.active:
+            return
+
+        if self.tracking_mode == 2:
+            # X축만 이동, Y는 canvas 중앙 고정
+            dx = self.move_dir.x() * self.SPEED * self._dt
+            dy = 0
+            nx = self.target_pos.x() + dx
+            ny = self.height() / 2
+
+            pad = self.TARGET_R + 2
+            if nx < pad or nx > self.width() - pad:
+                self.move_dir = QPointF(-self.move_dir.x(), 0)
+            self.target_pos = QPointF(
+                max(pad, min(self.width() - pad, nx)),
+                ny,
+            )
+        else:
+            dx = self.move_dir.x() * self.SPEED * self._dt
+            dy = self.move_dir.y() * self.SPEED * self._dt
+            nx = self.target_pos.x() + dx
+            ny = self.target_pos.y() + dy
+
+            pad = self.TARGET_R + 2
+            bounced = False
+            if nx < pad or nx > self.width() - pad:
+                self.move_dir = QPointF(-self.move_dir.x(), self.move_dir.y())
+                bounced = True
+            if ny < pad or ny > self.height() - pad:
+                self.move_dir = QPointF(self.move_dir.x(), -self.move_dir.y())
+                bounced = True
+            if bounced:
+                self._normalize_dir()
+
+            self.target_pos = QPointF(
+                max(pad, min(self.width()  - pad, nx)),
+                max(pad, min(self.height() - pad, ny)),
+            )
+
+        err = self.error_distance()
+        self._total_frames += 1
+        if err <= self.TARGET_R:
+            self._hit_frames += 1
+        self._errors.append(err)
+
+        err_x = self.target_pos.x() - self._virtual_cursor.x()
+        if self._prev_err_x != 0 and (err_x * self._prev_err_x < 0):
+            self._sign_changes += 1
+        self._prev_err_x = err_x
+
+        self.update()
+
+    def mousePressEvent(self, event):
+        if not self.active and self._on_start:
+            self._on_start()
+
+    def mouseMoveEvent(self, event):
+        raw = event.position()
+
+        if self.active and self._last_raw_pos is None:
+            self._virtual_cursor = QPointF(
+                max(0, min(self.width(),  raw.x())),
+                max(0, min(self.height(), raw.y())),
+            )
+        elif self.active and self._last_raw_pos is not None:
+            delta_x = raw.x() - self._last_raw_pos.x()
+            delta_y = raw.y() - self._last_raw_pos.y()
+            scale   = self._cursor_scale()
+
+            vx = self._virtual_cursor.x() + delta_x * scale
+            vy = self._virtual_cursor.y() + delta_y * scale
+
+            vx = max(0, min(self.width(),  vx))
+            vy = max(0, min(self.height(), vy))
+            self._virtual_cursor = QPointF(vx, vy)
+        elif not self.active:
+            self._virtual_cursor = raw
+
+        self._last_raw_pos = raw
+        self.update()
+
+    def enterEvent(self, event):
+        if self.active:
+            self.setCursor(Qt.CursorShape.BlankCursor)
+
+    def leaveEvent(self, event):
+        if not self.active:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._last_raw_pos = None
+
+    def error_distance(self) -> float:
+        dx = self.target_pos.x() - self._virtual_cursor.x()
+        dy = self.target_pos.y() - self._virtual_cursor.y()
+        return math.sqrt(dx * dx + dy * dy)
+
+    def session_result(self) -> dict:
+        total    = self._total_frames or 1
+        hit_rate = self._hit_frames / total * 100
+        avg_err  = sum(self._errors) / len(self._errors) if self._errors else 0
+        max_err  = max(self._errors) if self._errors else 0
+        osc_rate = self._sign_changes / total * 100
+
+        if osc_rate > 12 and avg_err > 12:
+            verdict = "빠름"
+        elif avg_err > 22 and osc_rate < 20:
+            verdict = "느림"
+        else:
+            verdict = "적정"
+
+        return dict(hit_rate=hit_rate, verdict=verdict,
+                    avg_err=avg_err, max_err=max_err, osc_rate=osc_rate)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#f5f5f0"))
+
+        if not self.active:
+            painter.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+            painter.setPen(QColor("#999999"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "클릭하여 시작")
+            return
+
+        cx = int(self._virtual_cursor.x())
+        cy = int(self._virtual_cursor.y())
+
+        err = self.error_distance()
+        on_target  = err <= self.TARGET_R
+        line_color = QColor("#44bb44") if on_target else QColor("#ff4444")
+        painter.setPen(QPen(line_color, 1, Qt.PenStyle.DotLine))
+        painter.drawLine(cx, cy,
+                         int(self.target_pos.x()), int(self.target_pos.y()))
+
+        r       = self.TARGET_R
+        t_color  = QColor(34, 180, 80, 200) if on_target else QColor(204, 34, 34, 180)
+        t_border = QColor("#22aa44")         if on_target else QColor("#cc2222")
+        painter.setPen(QPen(t_border, 2))
+        painter.setBrush(QBrush(t_color))
+        painter.drawEllipse(
+            QRectF(self.target_pos.x() - r, self.target_pos.y() - r, r * 2, r * 2)
+        )
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        tx, ty = int(self.target_pos.x()), int(self.target_pos.y())
+        painter.drawLine(tx - 7, ty, tx + 7, ty)
+        painter.drawLine(tx, ty - 7, tx, ty + 7)
+
+        painter.setPen(QPen(QColor("#111111"), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QRectF(cx - 3, cy - 3, 6, 6))
+        painter.drawLine(cx - 6, cy, cx - 4, cy)
+        painter.drawLine(cx + 4, cy, cx + 6, cy)
+        painter.drawLine(cx, cy - 6, cx, cy - 4)
+        painter.drawLine(cx, cy + 4, cx, cy + 6)
+
+        secs = max(0, self.remaining)
+        cd_color = (QColor("#ff4444") if secs <= 5 else
+                    QColor("#ffaa22") if secs <= 10 else
+                    QColor("#555555"))
+        painter.setPen(cd_color)
+        painter.setFont(QFont("Segoe UI", 28, QFont.Weight.Bold))
+        painter.drawText(
+            QRectF(self.width() - 100, 12, 88, 48),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            f"{secs}s"
+        )
+
+        bar_h    = 4
+        progress = 1.0 - (secs / SESSION_SECONDS)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#dddddd"))
+        painter.drawRect(0, self.height() - bar_h, self.width(), bar_h)
+        painter.setBrush(cd_color)
+        painter.drawRect(0, self.height() - bar_h, int(self.width() * progress), bar_h)
+
+        painter.setPen(QColor("#888888"))
+        painter.setFont(QFont("Segoe UI", 10))
+        cm360 = 360 / (self.dpi * self.sensitivity * self.game_yaw) * 2.54
+        painter.drawText(10, self.height() - 10,
+                         f"감도 {self.sensitivity:.2f}  |  "
+                         f"DPI {int(self.dpi)}  |  "
+                         f"cm/360°  {cm360:.1f}")
+
+        # mode 표시
+        mode_txt = "모드: X축 왕복" if self.tracking_mode == 2 else "모드: 랜덤"
+        painter.setPen(QColor("#aaaaaa"))
+        painter.setFont(QFont("Segoe UI", 10))
+        painter.drawText(10, 20, mode_txt)
+
+
+# ────────────────────────────────────────────
+#  그리드샷 캔버스
+# ────────────────────────────────────────────
+class GridshotCanvas(QWidget):
+    TARGET_R  = 24
+    GRID_COLS = 5
+    GRID_ROWS = 4
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+
+        self.active        = False
+        self._on_start     = None
+        self.on_result     = None  # 세션 종료 시 결과 콜백
+        self.sensitivity   = 1.50
+        self.game_yaw      = 0.022
+        self.dpi           = 800
+
+        self._virtual_cursor = QPointF(0, 0)
+        self._last_raw_pos   = None
+
+        self.remaining     = SESSION_SECONDS
+        self._active_idx   = -1   # 현재 활성 원 인덱스
+        self._hit_count    = 0
+        self._miss_count   = 0
+        self._react_times  = []
+        self._last_hit_time = 0.0
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+        self._grid_positions = []  # 격자 중심 위치들 (비율 기준)
+
+    def set_sensitivity(self, val: float, yaw: float = None, dpi: float = None):
+        self.sensitivity = val
+        if yaw is not None:
+            self.game_yaw = yaw
+        if dpi is not None:
+            self.dpi = dpi
+
+    def _cursor_scale(self) -> float:
+        return (self.dpi * self.sensitivity * self.game_yaw) / BASELINE
+
+    def _build_grid(self):
+        """캔버스 크기 기반으로 격자 위치 계산"""
+        self._grid_positions = []
+        w = self.width()
+        h = self.height()
+        pad_x = w * 0.10
+        pad_y = h * 0.15
+        cell_w = (w - pad_x * 2) / self.GRID_COLS
+        cell_h = (h - pad_y * 2) / self.GRID_ROWS
+        for r in range(self.GRID_ROWS):
+            for c in range(self.GRID_COLS):
+                cx = pad_x + cell_w * c + cell_w / 2
+                cy = pad_y + cell_h * r + cell_h / 2
+                self._grid_positions.append(QPointF(cx, cy))
+
+    def _pick_next(self):
+        """현재와 다른 랜덤 인덱스 선택"""
+        n = len(self._grid_positions)
+        if n == 0:
+            return
+        candidates = [i for i in range(n) if i != self._active_idx]
+        self._active_idx = random.choice(candidates)
+        self._last_hit_time = time.perf_counter()
+
+    def start(self):
+        self._build_grid()
+        self.active        = True
+        self._hit_count    = 0
+        self._miss_count   = 0
+        self._react_times  = []
+        self.remaining     = SESSION_SECONDS
+        self._last_raw_pos = None
+        self._active_idx   = -1
+
+        cx = self.width()  / 2
+        cy = self.height() / 2
+        self._virtual_cursor = QPointF(cx, cy)
+
+        self._pick_next()
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self._timer.start(1000)
+        self.update()
+
+    def stop(self):
+        self.active = False
+        self._timer.stop()
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._last_raw_pos = None
+        self.update()
+
+    def session_result(self) -> dict:
+        avg_react = (sum(self._react_times) / len(self._react_times) * 1000
+                     if self._react_times else 0)
+        return dict(
+            hits=self._hit_count,
+            misses=self._miss_count,
+            avg_react_ms=avg_react,
+        )
+
+    def _tick(self):
+        """1초마다 카운트다운"""
+        if not self.active:
+            return
+        self.remaining -= 1
+        if self.remaining <= 0:
+            self.remaining = 0
+            self.stop()
+            if self.on_result:
+                self.on_result(self.session_result())
+        self.update()
+
+    def mousePressEvent(self, event):
+        if not self.active:
+            if self._on_start:
+                self._on_start()
+            return
+
+        # 가상 커서 위치로 히트 판정
+        vx = self._virtual_cursor.x()
+        vy = self._virtual_cursor.y()
+
+        if self._active_idx >= 0 and self._active_idx < len(self._grid_positions):
+            target = self._grid_positions[self._active_idx]
+            dx = vx - target.x()
+            dy = vy - target.y()
+            dist = math.sqrt(dx * dx + dy * dy)
+
+            if dist <= self.TARGET_R:
+                # 히트
+                react = time.perf_counter() - self._last_hit_time
+                self._react_times.append(react)
+                self._hit_count += 1
+                self._pick_next()
+            else:
+                # 미스: 다른 원들도 확인
+                hit_other = False
+                for i, pos in enumerate(self._grid_positions):
+                    if i == self._active_idx:
+                        continue
+                    dx2 = vx - pos.x()
+                    dy2 = vy - pos.y()
+                    if math.sqrt(dx2 * dx2 + dy2 * dy2) <= self.TARGET_R:
+                        hit_other = True
+                        break
+                if not hit_other:
+                    self._miss_count += 1
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        raw = event.position()
+
+        if self.active and self._last_raw_pos is None:
+            self._virtual_cursor = QPointF(
+                max(0, min(self.width(),  raw.x())),
+                max(0, min(self.height(), raw.y())),
+            )
+        elif self.active and self._last_raw_pos is not None:
+            delta_x = raw.x() - self._last_raw_pos.x()
+            delta_y = raw.y() - self._last_raw_pos.y()
+            scale   = self._cursor_scale()
+
+            vx = self._virtual_cursor.x() + delta_x * scale
+            vy = self._virtual_cursor.y() + delta_y * scale
+            vx = max(0, min(self.width(),  vx))
+            vy = max(0, min(self.height(), vy))
+            self._virtual_cursor = QPointF(vx, vy)
+        elif not self.active:
+            self._virtual_cursor = raw
+
+        self._last_raw_pos = raw
+        self.update()
+
+    def enterEvent(self, event):
+        if self.active:
+            self.setCursor(Qt.CursorShape.BlankCursor)
+
+    def leaveEvent(self, event):
+        if not self.active:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._last_raw_pos = None
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 트래킹과 동일한 밝은 배경
+        painter.fillRect(self.rect(), QColor("#f5f5f0"))
+
+        if not self.active:
+            painter.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+            painter.setPen(QColor("#999999"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "클릭하여 시작")
+            return
+
+        # 활성 타겟만 표시 (비활성 원 없음)
+        if self._active_idx >= 0 and self._active_idx < len(self._grid_positions):
+            pos = self._grid_positions[self._active_idx]
+            r   = self.TARGET_R
+            painter.setPen(QPen(QColor("#cc2222"), 2))
+            painter.setBrush(QBrush(QColor(204, 34, 34, 180)))
+            painter.drawEllipse(QRectF(pos.x() - r, pos.y() - r, r * 2, r * 2))
+            # 중심 십자
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            tx, ty = int(pos.x()), int(pos.y())
+            painter.drawLine(tx - 7, ty, tx + 7, ty)
+            painter.drawLine(tx, ty - 7, tx, ty + 7)
+
+        # 가상 커서 (트래킹과 동일한 크로스헤어)
+        cx = int(self._virtual_cursor.x())
+        cy = int(self._virtual_cursor.y())
+        painter.setPen(QPen(QColor("#111111"), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QRectF(cx - 3, cy - 3, 6, 6))
+        painter.drawLine(cx - 6, cy, cx - 4, cy)
+        painter.drawLine(cx + 4, cy, cx + 6, cy)
+        painter.drawLine(cx, cy - 6, cx, cy - 4)
+        painter.drawLine(cx, cy + 4, cx, cy + 6)
+
+        # 카운트다운 (우상단) — 트래킹과 동일 색상 기준
+        secs = max(0, self.remaining)
+        cd_color = (QColor("#ff4444") if secs <= 5 else
+                    QColor("#ffaa22") if secs <= 10 else
+                    QColor("#555555"))
+        painter.setPen(cd_color)
+        painter.setFont(QFont("Segoe UI", 28, QFont.Weight.Bold))
+        painter.drawText(
+            QRectF(self.width() - 110, 12, 98, 48),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            f"{secs}s"
+        )
+
+        # 진행 바 (하단)
+        bar_h    = 4
+        progress = 1.0 - (secs / SESSION_SECONDS)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#dddddd"))
+        painter.drawRect(0, self.height() - bar_h, self.width(), bar_h)
+        painter.setBrush(cd_color)
+        painter.drawRect(0, self.height() - bar_h, int(self.width() * progress), bar_h)
+
+
+# ────────────────────────────────────────────
+#  감도 계산기 위젯
+# ────────────────────────────────────────────
+class SensCalcWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background:#f0ede8;")
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(24)
+
+        # ── 좌측: 입력 패널 ──────────────────────
+        left_panel = QFrame()
+        left_panel.setFixedWidth(300)
+        left_panel.setStyleSheet(
+            "background:#e8e4de; border-radius:8px;"
+        )
+        left_lay = QVBoxLayout(left_panel)
+        left_lay.setContentsMargins(20, 20, 20, 20)
+        left_lay.setSpacing(16)
+
+        title_l = QLabel("입력")
+        title_l.setStyleSheet("font-size:12px; color:#888; letter-spacing:2px;")
+        left_lay.addWidget(title_l)
+
+        # 게임 선택
+        game_lbl = QLabel("게임 선택")
+        game_lbl.setStyleSheet("font-size:10px; color:#888;")
+        left_lay.addWidget(game_lbl)
+
+        self._sc_game_combo = QComboBox()
+        for name, *_ in GAME_PRESETS:
+            self._sc_game_combo.addItem(name)
+        self._sc_game_combo.setStyleSheet("""
+            QComboBox {
+                font-size:15px; font-weight:bold; color:#333;
+                background:transparent; border:none;
+                border-bottom:2px solid #bbb; padding-bottom:2px;
+            }
+            QComboBox:focus { border-bottom-color:#555; }
+            QComboBox::drop-down { border:none; width:20px; }
+            QComboBox QAbstractItemView {
+                background:#f0ede8; border:1px solid #ccc;
+                color:#222; selection-background-color:#dedad4;
+                selection-color:#111; font-size:14px;
+            }
+        """)
+        self._sc_game_combo.currentIndexChanged.connect(self._recalc)
+        left_lay.addWidget(self._sc_game_combo)
+
+        sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setStyleSheet("color:#d0ccc6;")
+        left_lay.addWidget(sep1)
+
+        # 감도 입력
+        sens_lbl = QLabel("감도")
+        sens_lbl.setStyleSheet("font-size:10px; color:#888;")
+        left_lay.addWidget(sens_lbl)
+
+        self._sc_sens_spin = QDoubleSpinBox()
+        self._sc_sens_spin.setRange(0.01, 500.0)
+        self._sc_sens_spin.setSingleStep(0.10)
+        self._sc_sens_spin.setValue(2.50)
+        self._sc_sens_spin.setDecimals(2)
+        self._sc_sens_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                font-size:20px; font-weight:bold; color:#333;
+                background:transparent; border:none;
+                border-bottom:2px solid #bbb; padding-bottom:2px;
+            }
+            QDoubleSpinBox:focus { border-bottom-color:#555; }
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width:18px; }
+        """)
+        self._sc_sens_spin.valueChanged.connect(self._recalc)
+        left_lay.addWidget(self._sc_sens_spin)
+
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color:#d0ccc6;")
+        left_lay.addWidget(sep2)
+
+        # DPI 입력
+        dpi_lbl = QLabel("DPI")
+        dpi_lbl.setStyleSheet("font-size:10px; color:#888;")
+        left_lay.addWidget(dpi_lbl)
+
+        self._sc_dpi_spin = QDoubleSpinBox()
+        self._sc_dpi_spin.setRange(100, 32000)
+        self._sc_dpi_spin.setSingleStep(100)
+        self._sc_dpi_spin.setValue(800)
+        self._sc_dpi_spin.setDecimals(0)
+        self._sc_dpi_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                font-size:20px; font-weight:bold; color:#333;
+                background:transparent; border:none;
+                border-bottom:2px solid #bbb; padding-bottom:2px;
+            }
+            QDoubleSpinBox:focus { border-bottom-color:#555; }
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width:18px; }
+        """)
+        self._sc_dpi_spin.valueChanged.connect(self._recalc)
+        left_lay.addWidget(self._sc_dpi_spin)
+
+        left_lay.addStretch()
+        root.addWidget(left_panel)
+
+        # ── 우측: 결과 패널 ──────────────────────
+        right_panel = QFrame()
+        right_panel.setStyleSheet("background:#e8e4de; border-radius:8px;")
+        right_lay = QVBoxLayout(right_panel)
+        right_lay.setContentsMargins(24, 20, 24, 20)
+        right_lay.setSpacing(12)
+
+        self._cm360_lbl = QLabel()  # 숨김용 더미
+
+        # 다른 게임 등가 감도 표
+        equiv_lbl = QLabel("다른 게임 감도")
+        equiv_lbl.setStyleSheet("font-size:14px; color:#888; letter-spacing:1px;")
+        right_lay.addWidget(equiv_lbl)
+
+        self._equiv_table = QTableWidget(len(GAME_PRESETS), 2)
+        self._equiv_table.setHorizontalHeaderLabels(["다른 게임 감도", "감도"])
+        self._equiv_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._equiv_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self._equiv_table.horizontalHeader().resizeSection(1, 130)
+        self._equiv_table.verticalHeader().setVisible(False)
+        self._equiv_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._equiv_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._equiv_table.setShowGrid(False)
+        self._equiv_table.setStyleSheet("""
+            QTableWidget {
+                background:transparent; border:none; font-size:16px; color:#333;
+            }
+            QHeaderView::section {
+                background:#dedad4; color:#555; font-size:13px;
+                border:none; padding:6px;
+            }
+            QTableWidget::item { padding:6px 10px; }
+        """)
+        bold_font = QFont(); bold_font.setBold(True); bold_font.setPointSize(12)
+        for r, (name, *_) in enumerate(GAME_PRESETS):
+            item_name = QTableWidgetItem(name)
+            item_name.setFont(bold_font)
+            item_val  = QTableWidgetItem("—")
+            item_val.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._equiv_table.setItem(r, 0, item_name)
+            self._equiv_table.setItem(r, 1, item_val)
+
+        right_lay.addWidget(self._equiv_table, stretch=1)
+        root.addWidget(right_panel, stretch=1)
+
+        # 초기 계산
+        self._recalc()
+
+    def _recalc(self):
+        idx  = self._sc_game_combo.currentIndex()
+        name = GAME_PRESETS[idx][0]
+        sens = self._sc_sens_spin.value()
+        dpi  = self._sc_dpi_spin.value()
+        yaw  = GAME_YAW.get(name, 0.022)
+
+        # cm/360 계산
+        if sens > 0 and dpi > 0 and yaw > 0:
+            cm360 = 360 / (dpi * sens * yaw) * 2.54
+        else:
+            cm360 = 0
+
+        self._cm360_lbl.setText(f"{cm360:.2f}")
+
+        # 등가 감도 표 갱신
+        for r, (g_name, *_) in enumerate(GAME_PRESETS):
+            g_yaw = GAME_YAW.get(g_name, 0.022)
+            if g_yaw > 0 and dpi > 0:
+                equiv_sens = 360 / (dpi * g_yaw * cm360 / 2.54)
+                self._equiv_table.item(r, 1).setText(f"{equiv_sens:.4f}")
+            else:
+                self._equiv_table.item(r, 1).setText("—")
+
+
+# ────────────────────────────────────────────
+#  오차 그래프 위젯
+# ────────────────────────────────────────────
+class ErrorGraphWidget(QWidget):
+    """최근 5회 세션의 평균 오차를 꺾은선 그래프로 표시"""
+
+    _VERDICT_COLOR = {"빠름": "#ff4444", "느림": "#4488ff", "적정": "#44cc77"}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data: list[tuple[float, str]] = []  # (avg_err, verdict)
+        self.setFixedHeight(130)
+        self.setMinimumWidth(80)
+
+    def push(self, avg_err: float, verdict: str):
+        self._data.append((avg_err, verdict))
+        if len(self._data) > 5:
+            self._data.pop(0)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        W, H = self.width(), self.height()
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+
+        # 제목
+        title_font = QFont("Arial", 8)
+        painter.setFont(title_font)
+        painter.setPen(QColor("#333333"))
+        painter.drawText(8, 0, W - 16, 18,
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         "최근 오차 기록")
+
+        if not self._data:
+            painter.setPen(QColor("#aaaaaa"))
+            painter.drawText(0, 18, W, H - 18,
+                             Qt.AlignmentFlag.AlignCenter, "기록 없음")
+            return
+
+        PAD_L, PAD_R, PAD_T, PAD_B = 32, 10, 22, 22
+        plot_x0 = PAD_L
+        plot_y0 = PAD_T
+        plot_w  = W - PAD_L - PAD_R
+        plot_h  = H - PAD_T - PAD_B
+
+        values = [d[0] for d in self._data]
+        max_v  = max(max(values) * 1.25, 10.0)
+        n      = len(values)
+
+        # 격자선 (수평 3줄)
+        for i in range(4):
+            gy = plot_y0 + plot_h * i / 3
+            painter.setPen(QPen(QColor("#dddddd"), 1))
+            painter.drawLine(int(plot_x0), int(gy), int(plot_x0 + plot_w), int(gy))
+
+        # Y 축 레이블
+        small_font = QFont("Arial", 7)
+        painter.setFont(small_font)
+        painter.setPen(QColor("#333333"))
+        painter.drawText(0, plot_y0 - 6, PAD_L - 4, 12,
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         f"{max_v:.0f}")
+        painter.drawText(0, plot_y0 + plot_h - 6, PAD_L - 4, 12,
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         "0")
+
+        def to_pt(idx, val):
+            if n == 1:
+                x = plot_x0 + plot_w / 2
+            else:
+                x = plot_x0 + plot_w * idx / (n - 1)
+            y = plot_y0 + plot_h * (1.0 - val / max_v)
+            return int(x), int(y)
+
+        pts = [to_pt(i, v) for i, v in enumerate(values)]
+
+        # 선
+        painter.setPen(QPen(QColor("#2266cc"), 1, Qt.PenStyle.SolidLine))
+        for i in range(len(pts) - 1):
+            painter.drawLine(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1])
+
+        # 점 + 값 레이블
+        for i, (x, y) in enumerate(pts):
+            verdict = self._data[i][1]
+            dot_color = QColor(self._VERDICT_COLOR.get(verdict, "#4488ff"))
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(dot_color))
+            painter.drawEllipse(x - 4, y - 4, 8, 8)
+
+            # 값
+            painter.setPen(QColor("#111111"))
+            painter.setFont(small_font)
+            label = f"{values[i]:.1f}"
+            lx = x - 14 if i == n - 1 else x - 10
+            painter.drawText(lx, y - 14, 28, 12,
+                             Qt.AlignmentFlag.AlignCenter, label)
+
+        # X 축 레이블 (1회~5회)
+        painter.setFont(small_font)
+        painter.setPen(QColor("#333333"))
+        offset = 5 - n  # 5회 미만이면 번호를 맞춤
+        for i, (x, _) in enumerate(pts):
+            painter.drawText(x - 10, H - PAD_B + 4, 20, 14,
+                             Qt.AlignmentFlag.AlignCenter,
+                             f"{offset + i + 1}회")
+
+
+# ────────────────────────────────────────────
+#  메인 윈도우
+# ────────────────────────────────────────────
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("에임 트레이너")
+        self.resize(1200, 720)
+        self.setStyleSheet("background-color: #f0ede8;")
+
+        self._running   = False
+        self._paused    = False
+        self._countdown = SESSION_SECONDS
+
+        # 그리드샷 카운트다운
+        self._gs_running  = False
+
+        # 감도 변경 로그
+        self._sens_log = []   # [(verdict, before, after), ...]
+
+        # 오차 히스토리 (최근 5회)
+        self._err_history: list[tuple[float, str]] = []
+
+        self._current_mode = "트래킹 1"
+
+        self._build_ui()
+
+        self._info_timer = QTimer(self)
+        self._info_timer.timeout.connect(self._update_info)
+        self._info_timer.start(50)
+
+        self._cd_timer = QTimer(self)
+        self._cd_timer.timeout.connect(self._tick_countdown)
+
+    # ── UI 구성 ──────────────────────────────
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        root.addWidget(self._make_topbar())
+        root.addWidget(self._make_info_bar())
+
+        # QStackedWidget으로 body 구성
+        self._body_stack = QStackedWidget()
+
+        # 페이지 0,1: 트래킹 (공유 레이아웃)
+        tracking_page = QWidget()
+        tracking_page.setStyleSheet("background:#f0ede8;")
+        tp_lay = QHBoxLayout(tracking_page)
+        tp_lay.setContentsMargins(12, 8, 12, 8)
+        tp_lay.setSpacing(10)
+        tp_lay.addWidget(self._make_canvas_area(), stretch=3)
+        tp_lay.addWidget(self._make_right_panel(), stretch=1)
+        self._body_stack.addWidget(tracking_page)   # index 0 (트래킹1)
+
+        # 페이지 1: 트래킹2 (같은 위젯 재사용 — 별도 페이지 없이 mode만 변경)
+        # 실제로는 index 0 페이지에서 canvas.tracking_mode를 변경
+
+        # 페이지 1: 그리드샷
+        gridshot_page = QWidget()
+        gridshot_page.setStyleSheet("background:#f0ede8;")
+        gs_lay = QHBoxLayout(gridshot_page)
+        gs_lay.setContentsMargins(12, 8, 12, 8)
+        gs_lay.setSpacing(10)
+
+        self._gs_canvas = GridshotCanvas()
+        self._gs_canvas._on_start = self._gs_start
+        self._gs_canvas.on_result = self._gs_on_result
+        # 초기 감도 동기화
+        self._gs_canvas.set_sensitivity(2.50, yaw=0.022, dpi=800)
+        gs_lay.addWidget(self._gs_canvas, stretch=3)
+        gs_lay.addWidget(self._make_gs_right_panel(), stretch=1)
+        self._body_stack.addWidget(gridshot_page)   # index 1
+
+        # 페이지 2: 감도 계산기
+        self._sens_calc = SensCalcWidget()
+        self._body_stack.addWidget(self._sens_calc)  # index 2
+
+
+        root.addWidget(self._body_stack, stretch=1)
+        root.addWidget(self._make_bottom_bar())
+
+    def _make_topbar(self):
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet("background:#e8e4de; border-bottom:1px solid #d0ccc6;")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(16, 0, 16, 0)
+
+        title = QLabel("에임 트레이너")
+        title.setStyleSheet("font-size:15px; font-weight:bold; color:#222;")
+        lay.addWidget(title)
+        lay.addStretch()
+
+        self._mode_btns = {}
+        mode_bar = QFrame()
+        mode_bar.setStyleSheet("background:transparent;")
+        mode_lay = QHBoxLayout(mode_bar)
+        mode_lay.setContentsMargins(0, 0, 0, 0)
+        mode_lay.setSpacing(4)
+
+        modes = ["트래킹 1", "트래킹 2", "그리드샷", "감도 계산기"]
+        for i, name in enumerate(modes):
+            btn = QPushButton(name)
+            btn.setFixedHeight(28)
+            btn.setCheckable(True)
+            btn.setChecked(i == 0)
+            btn.clicked.connect(lambda checked, n=name: self._on_mode_changed(n))
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    color: #666;
+                    border: 1px solid transparent;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    padding: 0 12px;
+                }
+                QPushButton:checked {
+                    background: #333;
+                    color: #fff;
+                    border-color: #333;
+                }
+                QPushButton:hover:!checked {
+                    background: #dedad4;
+                    border-color: #ccc;
+                }
+            """)
+            mode_lay.addWidget(btn)
+            self._mode_btns[name] = btn
+
+        lay.addWidget(mode_bar)
+        lay.addSpacing(8)
+        return bar
+
+    def _on_mode_changed(self, selected: str):
+        # 버튼 상태 동기화
+        for name, btn in self._mode_btns.items():
+            btn.setChecked(name == selected)
+
+        # 현재 세션 중지
+        self._stop_all_sessions()
+
+        self._current_mode = selected
+
+        if selected == "트래킹 1":
+            self.canvas.tracking_mode = 2
+            self._body_stack.setCurrentIndex(0)
+            self._info_bar.show()
+        elif selected == "트래킹 2":
+            self.canvas.tracking_mode = 1
+            self._body_stack.setCurrentIndex(0)
+            self._info_bar.show()
+        elif selected == "그리드샷":
+            self._body_stack.setCurrentIndex(1)
+            self._info_bar.show()
+        elif selected == "감도 계산기":
+            self._body_stack.setCurrentIndex(2)
+            self._info_bar.hide()
+
+    def _stop_all_sessions(self):
+        """모든 세션 중지"""
+        if self._running or self._paused:
+            self._stop_session(show_result=False)
+        if self._gs_running:
+            self._gs_canvas.stop()
+            self._gs_running = False
+
+    def _make_info_bar(self):
+        self._info_bar = QFrame()
+        self._info_bar.setFixedHeight(80)
+        self._info_bar.setStyleSheet("background:#eae6e0; border-bottom:1px solid #d0ccc6;")
+        lay = QHBoxLayout(self._info_bar)
+        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setSpacing(0)
+
+        # 게임 선택
+        col0 = QVBoxLayout()
+        col0.setContentsMargins(24, 6, 24, 6)
+        col0.setSpacing(2)
+
+        lbl0 = QLabel("게임 선택")
+        lbl0.setStyleSheet("font-size:10px; color:#888;")
+
+        self._game_combo = QComboBox()
+        for name, *_ in GAME_PRESETS:
+            self._game_combo.addItem(name)
+        self._game_combo.setFixedWidth(180)
+        self._game_combo.setStyleSheet("""
+            QComboBox {
+                font-size: 16px; font-weight: bold; color: #333;
+                background: transparent; border: none;
+                border-bottom: 2px solid #bbb; padding-bottom: 2px;
+            }
+            QComboBox:focus { border-bottom-color: #555; }
+            QComboBox::drop-down { border: none; width: 20px; }
+            QComboBox QAbstractItemView {
+                background: #f0ede8; border: 1px solid #ccc;
+                color: #222; selection-background-color: #dedad4;
+                selection-color: #111; font-size: 16px;
+            }
+        """)
+        self._game_combo.currentIndexChanged.connect(self._on_game_changed)
+
+        col0.addWidget(lbl0)
+        col0.addWidget(self._game_combo)
+        lay.addLayout(col0)
+
+        sep0 = QFrame()
+        sep0.setFrameShape(QFrame.Shape.VLine)
+        sep0.setFixedHeight(62)
+        sep0.setStyleSheet("color:#c0bcb6;")
+        lay.addWidget(sep0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # 감도 스핀박스
+        col1 = QVBoxLayout()
+        col1.setContentsMargins(24, 6, 24, 6)
+        col1.setSpacing(2)
+
+        self._sens_label = QLabel("감도")
+        self._sens_label.setStyleSheet("font-size:10px; color:#888;")
+
+        self._spinbox = QDoubleSpinBox()
+        self._spinbox.setRange(0.10, 10.00)
+        self._spinbox.setSingleStep(0.10)
+        self._spinbox.setValue(2.50)
+        self._spinbox.setDecimals(2)
+        self._spinbox.setFixedWidth(120)
+        self._spinbox.setStyleSheet("""
+            QDoubleSpinBox {
+                font-size: 16px; font-weight: bold; color: #333;
+                background: transparent; border: none;
+                border-bottom: 2px solid #bbb; padding-bottom: 2px;
+            }
+            QDoubleSpinBox:focus { border-bottom-color: #555; }
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 18px; }
+        """)
+        self._spinbox.valueChanged.connect(self._on_sensitivity_changed)
+
+        col1.addWidget(self._sens_label)
+        col1.addWidget(self._spinbox)
+        lay.addLayout(col1)
+
+        self._edpi_lbl = None
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFixedHeight(40)
+        sep.setStyleSheet("color:#c0bcb6;")
+        lay.addWidget(sep, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        col2 = QVBoxLayout()
+        col2.setContentsMargins(24, 6, 24, 6)
+        col2.setSpacing(2)
+
+        lbl2 = QLabel("DPI")
+        lbl2.setStyleSheet("font-size:10px; color:#888;")
+
+        self._dpi_spinbox = QDoubleSpinBox()
+        self._dpi_spinbox.setRange(100, 32000)
+        self._dpi_spinbox.setSingleStep(100)
+        self._dpi_spinbox.setValue(800)
+        self._dpi_spinbox.setDecimals(0)
+        self._dpi_spinbox.setFixedWidth(120)
+        self._dpi_spinbox.setStyleSheet("""
+            QDoubleSpinBox {
+                font-size: 16px; font-weight: bold; color: #333;
+                background: transparent; border: none;
+                border-bottom: 2px solid #bbb; padding-bottom: 2px;
+            }
+            QDoubleSpinBox:focus { border-bottom-color: #555; }
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 18px; }
+        """)
+        self._dpi_spinbox.valueChanged.connect(self._on_dpi_changed)
+
+        col2.addWidget(lbl2)
+        col2.addWidget(self._dpi_spinbox)
+        lay.addLayout(col2)
+
+        lay.addStretch()
+        return self._info_bar
+
+    def _on_game_changed(self, index: int):
+        name, default, lo, hi, step = GAME_PRESETS[index]
+        yaw = GAME_YAW.get(name, 0.022)
+        self._sens_label.setText(f"{name} 감도")
+        self._spinbox.blockSignals(True)
+        self._spinbox.setRange(lo, hi)
+        self._spinbox.setSingleStep(step)
+        self._spinbox.setDecimals(2 if step < 1 else 0)
+        self._spinbox.setValue(default)
+        self._spinbox.blockSignals(False)
+        self.canvas.set_sensitivity(default, yaw=yaw, dpi=self._dpi_spinbox.value())
+        self._gs_canvas.set_sensitivity(default, yaw=yaw, dpi=self._dpi_spinbox.value())
+
+    def _on_sensitivity_changed(self, val: float):
+        name = GAME_PRESETS[self._game_combo.currentIndex()][0]
+        yaw  = GAME_YAW.get(name, 0.022)
+        self.canvas.set_sensitivity(val, yaw=yaw, dpi=self._dpi_spinbox.value())
+        self._gs_canvas.set_sensitivity(val, yaw=yaw, dpi=self._dpi_spinbox.value())
+
+    def _on_dpi_changed(self, val: float):
+        name = GAME_PRESETS[self._game_combo.currentIndex()][0]
+        yaw  = GAME_YAW.get(name, 0.022)
+        self.canvas.set_sensitivity(self._spinbox.value(), yaw=yaw, dpi=val)
+        self._gs_canvas.set_sensitivity(self._spinbox.value(), yaw=yaw, dpi=val)
+
+    def _make_canvas_area(self):
+        frame = QFrame()
+        frame.setStyleSheet("background:#dedad4; border-radius:6px;")
+
+        stack = QStackedLayout(frame)
+        stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        stack.setContentsMargins(0, 0, 0, 0)
+
+        self.canvas = TrackingCanvas()
+        self.canvas._on_start = self._toggle
+        self.canvas.set_sensitivity(2.50, yaw=0.022, dpi=800)
+        stack.addWidget(self.canvas)
+
+        self._overlay = _ClickOverlay(frame, on_click=self._toggle)
+        self._overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        ov_lay = QVBoxLayout(self._overlay)
+        ov_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._center_btn = None
+        stack.addWidget(self._overlay)
+
+        # 일시정지 오버레이
+        self._pause_overlay = QWidget(frame)
+        self._pause_overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._pause_overlay.hide()
+        p_lay = QVBoxLayout(self._pause_overlay)
+        p_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        p_lay.setSpacing(14)
+
+        pause_title = QLabel("일시정지")
+        pause_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pause_title.setStyleSheet(
+            "font-size:22px; font-weight:bold; color:#ffffff; letter-spacing:4px;"
+        )
+        p_lay.addWidget(pause_title)
+        p_lay.addSpacing(8)
+
+        resume_btn = QPushButton("▶  계속하기")
+        resume_btn.setFixedSize(200, 52)
+        resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        resume_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(30,30,30,220); color:#fff;
+                border: 2px solid #555; border-radius:26px;
+                font-size:15px; font-weight:bold;
+            }
+            QPushButton:hover  { background:rgba(60,60,60,235); border-color:#999; }
+            QPushButton:pressed { background:rgba(0,0,0,255); }
+        """)
+        resume_btn.clicked.connect(self._resume_session)
+        p_lay.addWidget(resume_btn)
+
+        exit_btn = QPushButton("✕  프로그램 종료")
+        exit_btn.setFixedSize(200, 52)
+        exit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        exit_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(160,20,20,210); color:#fff;
+                border: 2px solid #992222; border-radius:26px;
+                font-size:15px; font-weight:bold;
+            }
+            QPushButton:hover  { background:rgba(200,40,40,230); border-color:#cc4444; }
+            QPushButton:pressed { background:rgba(100,0,0,255); }
+        """)
+        exit_btn.clicked.connect(QApplication.quit)
+        p_lay.addWidget(exit_btn)
+
+        stack.addWidget(self._pause_overlay)
+        return frame
+
+    def _make_right_panel(self):
+        panel = QFrame()
+        panel.setFixedWidth(260)
+        panel.setStyleSheet("background:#e8e4de; border-radius:6px;")
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(12)
+
+        sec_lbl = QLabel("측정 데이터")
+        sec_lbl.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(sec_lbl)
+
+        self.error_lbl = QLabel("—")
+        self.error_lbl.setStyleSheet("font-size:36px; font-weight:bold; color:#333;")
+        lay.addWidget(self.error_lbl)
+
+        desc = QLabel("추적 세션 동안 실시간으로 픽셀 오차가 기록됩니다.")
+        desc.setStyleSheet("font-size:10px; color:#999;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+        lay.addSpacing(8)
+
+        perf_lbl = QLabel("성과 지표")
+        perf_lbl.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(perf_lbl)
+
+        self._metrics = {}
+        for key, default in [
+            ("명중률",    "—"),
+            ("평균 오차", "—"),
+            ("감도 판정", "—"),
+            ("남은 시간", f"{SESSION_SECONDS}s"),
+        ]:
+            row = QHBoxLayout()
+            k_lbl = QLabel(key)
+            k_lbl.setStyleSheet("font-size:11px; color:#666;")
+            v_lbl = QLabel(default)
+            v_lbl.setStyleSheet("font-size:11px; font-weight:bold; color:#333;")
+            v_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row.addWidget(k_lbl)
+            row.addStretch()
+            row.addWidget(v_lbl)
+            lay.addLayout(row)
+            self._metrics[key] = v_lbl
+
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color:#d0ccc6;")
+            lay.addWidget(sep)
+
+        lay.addStretch()
+
+        log_title = QLabel("감도 변경 로그")
+        log_title.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(log_title)
+
+        self._sens_log_lbl = QLabel("아직 변경 없음")
+        self._sens_log_lbl.setStyleSheet("font-size:10px; color:#999; line-height:150%;")
+        self._sens_log_lbl.setWordWrap(True)
+        lay.addWidget(self._sens_log_lbl)
+
+        lay.addSpacing(10)
+
+        graph_title = QLabel("평균 오차 추이")
+        graph_title.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(graph_title)
+
+        self._err_graph = ErrorGraphWidget()
+        lay.addWidget(self._err_graph)
+
+        return panel
+
+    def _make_gs_right_panel(self):
+        """그리드샷 전용 우측 패널 — 트래킹과 동일 디자인"""
+        panel = QFrame()
+        panel.setFixedWidth(260)
+        panel.setStyleSheet("background:#e8e4de; border-radius:6px;")
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(12)
+
+        # 측정 데이터 (대형 수치)
+        sec_lbl = QLabel("측정 데이터")
+        sec_lbl.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(sec_lbl)
+
+        self._gs_hit_lbl = QLabel("—")
+        self._gs_hit_lbl.setStyleSheet("font-size:36px; font-weight:bold; color:#333;")
+        lay.addWidget(self._gs_hit_lbl)
+
+        desc = QLabel("30초 동안 활성 타겟을 클릭하세요.")
+        desc.setStyleSheet("font-size:10px; color:#999;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+        lay.addSpacing(8)
+
+        # 성과 지표
+        perf_lbl = QLabel("성과 지표")
+        perf_lbl.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(perf_lbl)
+
+        self._gs_metrics = {}
+        for key, default in [
+            ("히트",         "—"),
+            ("미스",         "—"),
+            ("평균 반응시간", "—"),
+            ("남은 시간",    f"{SESSION_SECONDS}s"),
+        ]:
+            row_lay = QHBoxLayout()
+            k_lbl = QLabel(key)
+            k_lbl.setStyleSheet("font-size:11px; color:#666;")
+            v_lbl = QLabel(default)
+            v_lbl.setStyleSheet("font-size:11px; font-weight:bold; color:#333;")
+            v_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row_lay.addWidget(k_lbl)
+            row_lay.addStretch()
+            row_lay.addWidget(v_lbl)
+            lay.addLayout(row_lay)
+            self._gs_metrics[key] = v_lbl
+
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color:#d0ccc6;")
+            lay.addWidget(sep)
+
+        lay.addStretch()
+
+        note_title = QLabel("기술 노트")
+        note_title.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(note_title)
+        note = QLabel(
+            "정확한 측정을 위해 Windows의\n"
+            "\"포인터 정밀도 향상\" 기능이\n"
+            "비활성화되어 있는지 확인하세요."
+        )
+        note.setStyleSheet("font-size:10px; color:#999;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        return panel
+
+    def _make_bottom_bar(self):
+        bar = QFrame()
+        bar.setFixedHeight(52)
+        bar.setStyleSheet("background:#e8e4de; border-top:1px solid #d0ccc6;")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(16, 0, 16, 0)
+
+        session_lbl = QLabel("세션 01 / 04")
+        session_lbl.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(session_lbl)
+        lay.addStretch()
+
+        reset_btn = QPushButton("세션 재설정")
+        reset_btn.setFixedSize(100, 34)
+        reset_btn.setStyleSheet("""
+            QPushButton { background:transparent; color:#555;
+                          border:1px solid #bbb; border-radius:4px; font-size:12px; }
+            QPushButton:hover { background:#ddd; }
+        """)
+        reset_btn.clicked.connect(self._reset)
+        lay.addWidget(reset_btn)
+        lay.addStretch()
+
+        ts_lbl = QLabel("클릭하여 시작  |  ESC 일시정지  |  30초 측정")
+        ts_lbl.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(ts_lbl)
+        return bar
+
+    # ── 키 입력 ──────────────────────────────
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self._running:
+                self._pause_session()
+            elif self._paused:
+                self._resume_session()
+
+    # ── 트래킹 세션 동작 ─────────────────────
+    def _toggle(self):
+        if not self._running and not self._paused:
+            self._paused    = False
+            self._running   = True
+            self._countdown = SESSION_SECONDS
+            self.canvas.start()
+            self._overlay.hide()
+            self._cd_timer.start(1000)
+
+    def _pause_session(self):
+        self._paused  = True
+        self._running = False
+        self._cd_timer.stop()
+        self.canvas.stop()
+        self._pause_overlay.show()
+        self._pause_overlay.raise_()
+
+    def _resume_session(self):
+        self._paused  = False
+        self._running = True
+        self._pause_overlay.hide()
+        self.canvas.start_resume()
+        self._cd_timer.start(1000)
+
+    def _tick_countdown(self):
+        self._countdown -= 1
+        self.canvas.remaining = self._countdown
+        self._metrics["남은 시간"].setText(f"{self._countdown}s")
+        if self._countdown <= 0:
+            self._stop_session(show_result=True)
+
+    def _stop_session(self, show_result: bool):
+        self._running = False
+        self._paused  = False
+        self._cd_timer.stop()
+        self.canvas.stop()
+        self._pause_overlay.hide()
+        self._overlay.show()
+        self._metrics["남은 시간"].setText(f"{SESSION_SECONDS}s")
+
+        if show_result and self.canvas._total_frames > 0:
+            r = self.canvas.session_result()
+            # 오차 히스토리 업데이트
+            self._err_graph.push(r["avg_err"], r["verdict"])
+            self._show_combined_result_dialog(r)
+
+    def _reset(self):
+        mode = self._current_mode
+        if mode in ("트래킹 1", "트래킹 2"):
+            self._stop_session(show_result=False)
+            self.error_lbl.setText("—")
+            for k, v in self._metrics.items():
+                v.setText(f"{SESSION_SECONDS}s" if k == "남은 시간" else "—")
+        elif mode == "그리드샷":
+            if self._gs_running:
+                self._gs_canvas.stop()
+                self._gs_running = False
+            for k, v in self._gs_metrics.items():
+                v.setText(f"{SESSION_SECONDS}s" if k == "남은 시간" else "—")
+            self._gs_canvas.update()
+
+    def _update_info(self):
+        """50ms마다 패널 정보 갱신"""
+        mode = self._current_mode
+        if mode in ("트래킹 1", "트래킹 2"):
+            if not self._running:
+                return
+            err = self.canvas.error_distance()
+            self.error_lbl.setText(f"{err:.1f}")
+
+            total   = self.canvas._total_frames or 1
+            hit_pct = self.canvas._hit_frames / total * 100
+            self._metrics["명중률"].setText(f"{hit_pct:.1f} %")
+            self._metrics["평균 오차"].setText(
+                f"{sum(self.canvas._errors)/len(self.canvas._errors):.1f} px"
+                if self.canvas._errors else "—"
+            )
+            osc     = self.canvas._sign_changes / total * 100
+            avg_err = sum(self.canvas._errors) / len(self.canvas._errors) if self.canvas._errors else 0
+            if osc > 12 and avg_err > 12:
+                verdict, color = "빠름", "#cc2222"
+            elif avg_err > 22 and osc < 20:
+                verdict, color = "느림",  "#2266cc"
+            else:
+                verdict, color = "적정",  "#22aa44"
+            self._metrics["감도 판정"].setText(verdict)
+            self._metrics["감도 판정"].setStyleSheet(
+                f"font-size:11px; font-weight:bold; color:{color};"
+            )
+
+        elif mode == "그리드샷":
+            if not self._gs_running:
+                return
+            gs = self._gs_canvas
+            self._gs_hit_lbl.setText(str(gs._hit_count))
+            self._gs_metrics["히트"].setText(str(gs._hit_count))
+            self._gs_metrics["미스"].setText(str(gs._miss_count))
+            avg_rt = (sum(gs._react_times) / len(gs._react_times) * 1000
+                      if gs._react_times else 0)
+            self._gs_metrics["평균 반응시간"].setText(
+                f"{avg_rt:.0f} ms" if gs._react_times else "—"
+            )
+            self._gs_metrics["남은 시간"].setText(f"{gs.remaining}s")
+
+    # ── 그리드샷 세션 동작 ──────────────────
+    def _gs_start(self):
+        if not self._gs_running:
+            self._gs_running = True
+            self._gs_canvas.start()
+
+    def _gs_on_result(self, result: dict):
+        """그리드샷 세션 종료 콜백"""
+        self._gs_running = False
+        # 결과 패널 갱신
+        self._gs_hit_lbl.setText(str(result["hits"]))
+        self._gs_metrics["히트"].setText(str(result["hits"]))
+        self._gs_metrics["미스"].setText(str(result["misses"]))
+        avg_rt = result["avg_react_ms"]
+        self._gs_metrics["평균 반응시간"].setText(
+            f"{avg_rt:.0f} ms" if avg_rt > 0 else "—"
+        )
+        self._gs_metrics["남은 시간"].setText("0s")
+
+        # 결과 다이얼로그
+        dlg = QDialog(self)
+        dlg.setWindowTitle("그리드샷 결과")
+        dlg.setFixedSize(380, 320)
+        dlg.setStyleSheet("background:#1e1e1e; color:#fff;")
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(32, 32, 32, 32)
+        lay.setSpacing(8)
+
+        t = QLabel("그리드샷 완료")
+        t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t.setStyleSheet("font-size:13px; color:#888; letter-spacing:3px;")
+        lay.addWidget(t)
+        lay.addSpacing(10)
+
+        for label, value in [
+            ("히트",         str(result["hits"])),
+            ("미스",         str(result["misses"])),
+            ("평균 반응시간", f"{avg_rt:.0f} ms" if avg_rt > 0 else "—"),
+        ]:
+            row = QHBoxLayout()
+            k = QLabel(label)
+            k.setStyleSheet("font-size:14px; color:#aaa;")
+            v = QLabel(value)
+            v.setStyleSheet("font-size:20px; font-weight:bold; color:#ccccff;")
+            v.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row.addWidget(k)
+            row.addStretch()
+            row.addWidget(v)
+            lay.addLayout(row)
+            sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color:#333;")
+            lay.addWidget(sep)
+
+        lay.addStretch()
+
+        btn_row = QHBoxLayout()
+        retry_btn = QPushButton("다시 시작")
+        retry_btn.setFixedHeight(40)
+        retry_btn.setStyleSheet("""
+            QPushButton { background:#333; color:#fff; border:1px solid #555;
+                          border-radius:6px; font-size:13px; }
+            QPushButton:hover { background:#444; }
+        """)
+        retry_btn.clicked.connect(dlg.reject)
+
+        close_btn = QPushButton("닫기")
+        close_btn.setFixedHeight(40)
+        close_btn.setStyleSheet("""
+            QPushButton { background:#3333aa; color:#fff; border:none;
+                          border-radius:6px; font-size:13px; font-weight:bold; }
+            QPushButton:hover { background:#5555cc; }
+        """)
+        close_btn.clicked.connect(dlg.accept)
+
+        btn_row.addWidget(retry_btn)
+        btn_row.addSpacing(10)
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+
+        dlg.exec()
+
+
+    # ── 통합 결과 + 감도 조정 다이얼로그 ──────────────────────
+    def _show_combined_result_dialog(self, r: dict):
+        verdict   = r["verdict"]
+        hit_rate  = r["hit_rate"]
+        avg_err   = r["avg_err"]
+        max_err   = r["max_err"]
+        osc_rate  = r["osc_rate"]
+        cur_sens  = self._spinbox.value()
+        step      = GAME_PRESETS[self._game_combo.currentIndex()][4]
+
+        colors = {"느림": "#4488ff", "빠름": "#ff4444", "적정": "#44cc77"}
+        v_color = colors.get(verdict, "#fff")
+        descs   = {
+            "느림": "커서가 타겟을 자주 놓쳤습니다.\n감도를 조금 높여보세요.",
+            "빠름": "커서가 타겟을 자주 지나쳤습니다.\n감도를 조금 낮춰보세요.",
+            "적정": "커서가 타겟을 안정적으로 추적했습니다.\n현재 감도가 잘 맞습니다.",
+        }
+
+        dlg = QDialog(self)
+        dlg.setFixedSize(460, 660)
+        dlg.setStyleSheet("background:#1e1e1e; color:#fff;")
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(36, 32, 36, 32)
+        root.setSpacing(0)
+
+        # 타이틀
+        title = QLabel("측정 완료")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size:13px; color:#888; letter-spacing:3px;")
+        root.addWidget(title)
+        root.addSpacing(4)
+
+        sens_lbl = QLabel(f"감도  {cur_sens:.2f}  기준")
+        sens_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sens_lbl.setStyleSheet("font-size:11px; color:#555;")
+        root.addWidget(sens_lbl)
+        root.addSpacing(10)
+
+        # 판정
+        vl = QLabel(verdict)
+        vl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vl.setStyleSheet(f"font-size:64px; font-weight:bold; color:{v_color}; letter-spacing:4px;")
+        root.addWidget(vl)
+
+        desc = QLabel(descs.get(verdict, ""))
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc.setStyleSheet("font-size:11px; color:#aaa;")
+        desc.setWordWrap(True)
+        root.addWidget(desc)
+        root.addSpacing(16)
+
+        # 구분선
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#333;"); root.addWidget(sep)
+        root.addSpacing(12)
+
+        # 통계
+        def hit_color(rate):
+            if rate >= 60: return "#44cc77"
+            if rate >= 35: return "#ffaa22"
+            return "#ff4444"
+
+        for label, value, color in [
+            ("명중률",    f"{hit_rate:.1f} %",  hit_color(hit_rate)),
+            ("평균 오차", f"{avg_err:.1f} px",  "#ccc"),
+            ("최대 오차", f"{max_err:.1f} px",  "#ccc"),
+            ("진동 비율", f"{osc_rate:.1f} %",  "#ccc"),
+        ]:
+            row = QHBoxLayout()
+            k = QLabel(label); k.setStyleSheet("font-size:13px; color:#888;")
+            v = QLabel(value); v.setStyleSheet(f"font-size:13px; font-weight:bold; color:{color};")
+            v.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row.addWidget(k); row.addStretch(); row.addWidget(v)
+            root.addLayout(row)
+            root.addSpacing(8)
+
+        root.addSpacing(8)
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color:#333;"); root.addWidget(sep2)
+        root.addSpacing(12)
+
+        # 추천 감도 계산
+        rec_delta = {"빠름": -0.1, "느림": +0.1, "적정": 0.0}.get(verdict, 0.0)
+        rec_sens  = round(max(self._spinbox.minimum(),
+                              min(self._spinbox.maximum(),
+                                  cur_sens + rec_delta)), 6)
+
+        rec_row = QHBoxLayout()
+        rec_k = QLabel("추천 감도")
+        rec_k.setStyleSheet("font-size:13px; color:#888;")
+        if verdict == "적정":
+            rec_val_text = f"{rec_sens:.4f}  (현재 적정)"
+            rec_val_color = "#44cc77"
+        elif verdict == "빠름":
+            rec_val_text = f"{rec_sens:.4f}  (−0.1 권장)"
+            rec_val_color = "#ff8888"
+        else:
+            rec_val_text = f"{rec_sens:.4f}  (+0.1 권장)"
+            rec_val_color = "#88aaff"
+        rec_v = QLabel(rec_val_text)
+        rec_v.setStyleSheet(f"font-size:13px; font-weight:bold; color:{rec_val_color};")
+        rec_v.setAlignment(Qt.AlignmentFlag.AlignRight)
+        rec_row.addWidget(rec_k); rec_row.addStretch(); rec_row.addWidget(rec_v)
+        root.addLayout(rec_row)
+        root.addSpacing(12)
+
+        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet("color:#333;"); root.addWidget(sep3)
+        root.addSpacing(12)
+
+        # 현재 감도 표시
+        self._combined_sens_lbl = QLabel(f"현재 감도:  {cur_sens:.4f}")
+        self._combined_sens_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._combined_sens_lbl.setStyleSheet("font-size:14px; color:#ccc; font-weight:bold;")
+        root.addWidget(self._combined_sens_lbl)
+        root.addSpacing(10)
+
+        # 미세 조정 버튼
+        fine_lbl = QLabel("감도 조정")
+        fine_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fine_lbl.setStyleSheet("font-size:10px; color:#666;")
+        root.addWidget(fine_lbl)
+        root.addSpacing(6)
+
+        # 조정 버튼 행
+        _applied_sens = [cur_sens]
+
+        def apply_delta(delta):
+            new_s = round(max(self._spinbox.minimum(),
+                              min(self._spinbox.maximum(),
+                                  _applied_sens[0] + delta)), 6)
+            _applied_sens[0] = new_s
+            self._spinbox.setValue(new_s)
+            self._on_sensitivity_changed(new_s)
+            self._combined_sens_lbl.setText(f"현재 감도:  {new_s:.4f}")
+            arrow = "↑" if delta > 0 else "↓"
+            self._add_sens_log(verdict, cur_sens, new_s, arrow)
+
+        def _btn(label, delta, bg, hov):
+            b = QPushButton(label)
+            b.setFixedHeight(40)
+            b.setStyleSheet(f"""
+                QPushButton {{ background:{bg}; color:#fff; border:none;
+                              border-radius:6px; font-size:12px; font-weight:bold; }}
+                QPushButton:hover {{ background:{hov}; }}
+            """)
+            b.clicked.connect(lambda: apply_delta(delta))
+            return b
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(6)
+        btn_row.addWidget(_btn("−0.1",  -0.1,  "#882222", "#aa3333"))
+        btn_row.addWidget(_btn("−0.01", -0.01, "#663333", "#884444"))
+        btn_row.addWidget(_btn("+0.01", +0.01, "#334466", "#445588"))
+        btn_row.addWidget(_btn("+0.1",  +0.1,  "#224488", "#336699"))
+        root.addLayout(btn_row)
+        root.addSpacing(16)
+
+        # 하단 버튼
+        bottom = QHBoxLayout(); bottom.setSpacing(12)
+
+        retry_btn = QPushButton("다시 측정")
+        retry_btn.setFixedHeight(42)
+        retry_btn.setStyleSheet("""
+            QPushButton { background:#333; color:#fff; border:1px solid #555;
+                          border-radius:6px; font-size:13px; }
+            QPushButton:hover { background:#444; }
+        """)
+        retry_btn.clicked.connect(dlg.reject)
+
+        close_btn = QPushButton("닫기")
+        close_btn.setFixedHeight(42)
+        close_btn.setStyleSheet("""
+            QPushButton { background:#cc2222; color:#fff; border:none;
+                          border-radius:6px; font-size:13px; font-weight:bold; }
+            QPushButton:hover { background:#ee4444; }
+        """)
+        close_btn.clicked.connect(dlg.accept)
+
+        bottom.addWidget(retry_btn)
+        bottom.addWidget(close_btn)
+        root.addLayout(bottom)
+
+        dlg.exec()
+
+    # ── 감도 조정 다이얼로그 ─────────────────────────────────
+    def _show_sens_adjust_dialog(self, verdict: str):
+        cur_sens = self._spinbox.value()
+
+        # 판정에 따라 자동 방향 결정
+        auto_delta = 0.0
+        if verdict == "느림":
+            auto_delta = +0.1
+        elif verdict == "빠름":
+            auto_delta = -0.1
+
+        # 자동 적용
+        if auto_delta != 0.0:
+            auto_sens = round(
+                max(self._spinbox.minimum(),
+                    min(self._spinbox.maximum(), cur_sens + auto_delta)), 6
+            )
+            self._spinbox.setValue(auto_sens)
+            self._on_sensitivity_changed(auto_sens)
+            arrow = "↑" if auto_delta > 0 else "↓"
+            self._add_sens_log(verdict, cur_sens, auto_sens, arrow)
+            cur_sens = auto_sens  # 다이얼로그에서 현재값 갱신
+
+        # 추가 미세 조정 다이얼로그
+        dlg = QDialog(self)
+        dlg.setFixedSize(420, 310)
+        dlg.setStyleSheet("background:#1e1e1e; color:#fff;")
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(28, 24, 28, 24)
+        lay.setSpacing(10)
+
+        colors = {"느림": "#4488ff", "빠름": "#ff4444", "적정": "#44cc77"}
+        color  = colors.get(verdict, "#fff")
+
+        verdict_lbl = QLabel(f"판정: {verdict}")
+        verdict_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        verdict_lbl.setStyleSheet(f"font-size:20px; font-weight:bold; color:{color};")
+        lay.addWidget(verdict_lbl)
+
+        if auto_delta != 0.0:
+            auto_info = QLabel(f"자동 적용: {cur_sens - auto_delta:.4f}  →  {cur_sens:.4f}")
+        else:
+            auto_info = QLabel("현재 감도가 적정입니다")
+        auto_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        auto_info.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(auto_info)
+
+        cur_lbl = QLabel(f"현재 감도: {cur_sens:.4f}")
+        cur_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cur_lbl.setStyleSheet("font-size:13px; color:#ccc; font-weight:bold;")
+        lay.addWidget(cur_lbl)
+
+        lay.addSpacing(4)
+
+        fine_lbl = QLabel("추가로 미세 조정하겠습니까?")
+        fine_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fine_lbl.setStyleSheet("font-size:11px; color:#666;")
+        lay.addWidget(fine_lbl)
+
+        # 버튼: −0.1  −0.01  [유지]  +0.01  +0.1
+        def _btn(label, delta, bg, hov):
+            b = QPushButton(label)
+            b.setFixedHeight(40)
+            b.setStyleSheet(f"""
+                QPushButton {{ background:{bg}; color:#fff; border:none;
+                              border-radius:6px; font-size:12px; font-weight:bold; }}
+                QPushButton:hover {{ background:{hov}; }}
+            """)
+            b.clicked.connect(lambda: dlg.done(delta))
+            return b
+
+        row1 = QHBoxLayout(); row1.setSpacing(6)
+        row1.addWidget(_btn("−0.1",  -10, "#882222", "#aa3333"))
+        row1.addWidget(_btn("−0.01",  -1, "#663333", "#884444"))
+        row1.addWidget(_btn("유지",    0, "#444",    "#555"))
+        row1.addWidget(_btn("+0.01",  +1, "#334466", "#445588"))
+        row1.addWidget(_btn("+0.1",  +10, "#224488", "#336699"))
+        lay.addLayout(row1)
+
+        # done 값: -10=−0.1, -1=−0.01, 0=유지, +1=+0.01, +10=+0.1
+        delta_map = {-10: -0.1, -1: -0.01, 0: 0.0, 1: +0.01, 10: +0.1}
+        raw = dlg.exec()
+        fine = delta_map.get(raw, 0.0)
+
+        if fine != 0.0:
+            new_sens = round(
+                max(self._spinbox.minimum(),
+                    min(self._spinbox.maximum(), cur_sens + fine)), 6
+            )
+            self._spinbox.setValue(new_sens)
+            self._on_sensitivity_changed(new_sens)
+            arrow = "↑" if fine > 0 else "↓"
+            self._add_sens_log(verdict, cur_sens, new_sens, arrow)
+
+    def _add_sens_log(self, verdict: str, before: float, after: float, arrow: str):
+        entry = f"{verdict}  {before:.2f} {arrow} {after:.2f}"
+        self._sens_log.append(entry)
+        # 최근 6개만 표시
+        self._sens_log_lbl.setText("\n".join(self._sens_log[-6:]))
+
+
+# ────────────────────────────────────────────
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
