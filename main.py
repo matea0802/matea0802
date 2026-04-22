@@ -5,6 +5,7 @@ import time
 import os
 import re
 import glob
+import json
 try:
     import winreg
     _HAS_WINREG = True
@@ -16,7 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QHBoxLayout, QVBoxLayout, QFrame,
     QStackedLayout, QDialog, QDoubleSpinBox, QComboBox,
     QStackedWidget, QSizePolicy, QTableWidget, QTableWidgetItem,
-    QHeaderView,
+    QHeaderView, QFileDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont
@@ -28,6 +29,9 @@ FULL_ROTATION_DEG    = 360
 
 # 기준값: Apex 1.5 at 800 DPI → scale = (DPI × sens × yaw) / BASELINE
 BASELINE = 800 * 1.5 * 0.022   # ≈ 26.4
+
+# 세션 기록 저장 파일 (스크립트와 같은 디렉터리)
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session_history.json")
 
 # ── 공통 스타일시트 ──────────────────────────────────────────
 _SPINBOX_STYLE = """
@@ -65,7 +69,45 @@ def _steam_path() -> str:
     return r"C:\Program Files (x86)\Steam"
 
 
-def _first_glob(pattern: str):
+def _all_steam_libraries() -> list[str]:
+    """
+    Steam의 모든 라이브러리 폴더 목록 반환.
+    libraryfolders.vdf 를 파싱해 C: 외의 드라이브에 설치된 게임도 탐색.
+    """
+    base = _steam_path()
+    libraries = [base]
+
+    vdf_path = os.path.join(base, r"steamapps\libraryfolders.vdf")
+    if not os.path.exists(vdf_path):
+        return libraries
+
+    try:
+        with open(vdf_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        # "path"  "D:\\Games\\Steam" 형식의 줄 추출
+        for match in re.finditer(r'"path"\s+"([^"]+)"', content):
+            folder = match.group(1).replace("\\\\", "\\")
+            if folder not in libraries:
+                libraries.append(folder)
+    except Exception:
+        pass
+
+    return libraries
+
+
+def _find_in_steam(relative: str) -> str | None:
+    """
+    모든 Steam 라이브러리에서 relative 경로(steamapps\common\... 형식)를 탐색.
+    존재하는 첫 번째 경로 반환, 없으면 None.
+    """
+    for lib in _all_steam_libraries():
+        candidate = os.path.join(lib, relative)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _first_glob(pattern: str) -> str | None:
     matches = glob.glob(pattern)
     return matches[0] if matches else None
 
@@ -86,8 +128,7 @@ GAME_CONFIG = {
         "fmt":     lambda v: f"{v:.6f}",
     },
     "CS2": {
-        "path_fn": lambda: os.path.join(
-            _steam_path(),
+        "path_fn": lambda: _find_in_steam(
             r"steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\config.cfg"),
         "pattern": r'(sensitivity\s+)"?([0-9.]+)"?',
         "repl":    r'sensitivity "{val}"',
@@ -580,6 +621,13 @@ class GridshotCanvas(QWidget):
         self._last_raw_pos = None
         self.update()
 
+    def start_resume(self):
+        """일시정지 후 재개 — 카운트다운 타이머는 MainWindow가 관리"""
+        self.active = True
+        self._last_raw_pos = None
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self.update()
+
     def session_result(self) -> dict:
         avg_react = (sum(self._react_times) / len(self._react_times) * 1000
                      if self._react_times else 0)
@@ -737,6 +785,8 @@ class SensCalcWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet("background:#f0ede8;")
+        # 메인 윈도우가 연결할 콜백: on_apply(game_name, sens, dpi)
+        self.on_apply = None
 
         root = QHBoxLayout(self)
         root.setContentsMargins(24, 24, 24, 24)
@@ -778,7 +828,7 @@ class SensCalcWidget(QWidget):
                 selection-color:#111; font-size:14px;
             }
         """)
-        self._sc_game_combo.currentIndexChanged.connect(self._recalc)
+        self._sc_game_combo.currentIndexChanged.connect(self._on_sc_game_changed)
         left_lay.addWidget(self._sc_game_combo)
 
         sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
@@ -790,11 +840,13 @@ class SensCalcWidget(QWidget):
         sens_lbl.setStyleSheet("font-size:10px; color:#888;")
         left_lay.addWidget(sens_lbl)
 
+        # 초기 게임(Apex Legends) 기본값으로 설정
+        _init_name, _init_def, _init_lo, _init_hi, _init_step = GAME_PRESETS[0]
         self._sc_sens_spin = QDoubleSpinBox()
-        self._sc_sens_spin.setRange(0.01, 500.0)
-        self._sc_sens_spin.setSingleStep(0.10)
-        self._sc_sens_spin.setValue(2.50)
-        self._sc_sens_spin.setDecimals(2)
+        self._sc_sens_spin.setRange(_init_lo, _init_hi)
+        self._sc_sens_spin.setSingleStep(_init_step)
+        self._sc_sens_spin.setValue(_init_def)
+        self._sc_sens_spin.setDecimals(3 if _init_step < 0.01 else 2 if _init_step < 1 else 0)
         self._sc_sens_spin.setStyleSheet(_SPINBOX_STYLE.format(size=20))
         self._sc_sens_spin.valueChanged.connect(self._recalc)
         left_lay.addWidget(self._sc_sens_spin)
@@ -863,9 +915,52 @@ class SensCalcWidget(QWidget):
             self._equiv_table.setItem(r, 1, item_val)
 
         right_lay.addWidget(self._equiv_table, stretch=1)
+
+        # 적용 버튼 — 현재 선택 행의 게임+감도를 메인 스핀박스에 반영
+        apply_hint = QLabel("표에서 행을 클릭하면 해당 게임 감도를 메인에 적용합니다.")
+        apply_hint.setStyleSheet("font-size:10px; color:#999;")
+        apply_hint.setWordWrap(True)
+        right_lay.addWidget(apply_hint)
+
+        self._apply_btn = QPushButton("▶  선택한 게임 감도를 메인에 적용")
+        self._apply_btn.setFixedHeight(40)
+        self._apply_btn.setStyleSheet("""
+            QPushButton {
+                background:#2a4a2a; color:#7dff9a;
+                border:1px solid #3a7a3a; border-radius:6px;
+                font-size:13px; font-weight:bold;
+            }
+            QPushButton:hover  { background:#3a6a3a; }
+            QPushButton:pressed { background:#1a3a1a; }
+        """)
+        self._apply_btn.clicked.connect(self._do_apply)
+        right_lay.addWidget(self._apply_btn)
+
         root.addWidget(right_panel, stretch=1)
 
         # 초기 계산
+        self._recalc()
+
+        # 테이블 행 클릭 시 해당 게임 행 하이라이트
+        self._equiv_table.cellClicked.connect(self._on_table_row_clicked)
+        self._selected_row = 0  # 기본 선택: 첫 번째 행
+
+    def sync_dpi(self, dpi: float):
+        """메인 DPI 스핀박스 값을 계산기에 동기화 (감도 계산기 탭 진입 시 호출)"""
+        self._sc_dpi_spin.blockSignals(True)
+        self._sc_dpi_spin.setValue(dpi)
+        self._sc_dpi_spin.blockSignals(False)
+        self._recalc()
+
+    def _on_sc_game_changed(self, idx: int):
+        """게임 변경 시 해당 게임의 기본 감도를 자동 입력"""
+        _, default, lo, hi, step = GAME_PRESETS[idx]
+        self._sc_sens_spin.blockSignals(True)
+        self._sc_sens_spin.setRange(lo, hi)
+        self._sc_sens_spin.setSingleStep(step)
+        self._sc_sens_spin.setDecimals(3 if step < 0.01 else 2 if step < 1 else 0)
+        self._sc_sens_spin.setValue(default)
+        self._sc_sens_spin.blockSignals(False)
         self._recalc()
 
     def _recalc(self):
@@ -877,7 +972,7 @@ class SensCalcWidget(QWidget):
 
         # cm/360 계산
         if sens > 0 and dpi > 0 and yaw > 0:
-            cm360 = 360 / (dpi * sens * yaw) * 2.54
+            cm360 = FULL_ROTATION_DEG / (dpi * sens * yaw) * PIXELS_PER_INCH
         else:
             cm360 = 0
 
@@ -887,10 +982,38 @@ class SensCalcWidget(QWidget):
         for r, (g_name, *_) in enumerate(GAME_PRESETS):
             g_yaw = GAME_YAW.get(g_name, 0.022)
             if g_yaw > 0 and dpi > 0:
-                equiv_sens = 360 / (dpi * g_yaw * cm360 / 2.54)
+                equiv_sens = FULL_ROTATION_DEG / (dpi * g_yaw * cm360 / PIXELS_PER_INCH)
                 self._equiv_table.item(r, 1).setText(f"{equiv_sens:.4f}")
             else:
                 self._equiv_table.item(r, 1).setText("—")
+
+        # 선택 행 버튼 텍스트 갱신
+        self._refresh_apply_btn()
+
+    def _on_table_row_clicked(self, row: int, _col: int):
+        self._selected_row = row
+        self._refresh_apply_btn()
+
+    def _refresh_apply_btn(self):
+        if not hasattr(self, "_apply_btn"):
+            return
+        row  = getattr(self, "_selected_row", 0)
+        name = GAME_PRESETS[row][0]
+        val  = self._equiv_table.item(row, 1).text() if self._equiv_table.item(row, 1) else "—"
+        self._apply_btn.setText(f"▶  {name}  {val}  → 메인에 적용")
+
+    def _do_apply(self):
+        if not self.on_apply:
+            return
+        row  = getattr(self, "_selected_row", 0)
+        name = GAME_PRESETS[row][0]
+        val_txt = self._equiv_table.item(row, 1).text() if self._equiv_table.item(row, 1) else ""
+        try:
+            sens = float(val_txt)
+        except ValueError:
+            return
+        dpi = self._sc_dpi_spin.value()
+        self.on_apply(name, sens, dpi)
 
 
 # ────────────────────────────────────────────
@@ -1017,14 +1140,17 @@ class MainWindow(QMainWindow):
         self._paused    = False
         self._countdown = SESSION_SECONDS
 
-        # 그리드샷 카운트다운
+        # 그리드샷 상태
         self._gs_running  = False
+        self._gs_paused   = False
 
         # 감도 변경 로그
         self._sens_log = []   # [(verdict, before, after), ...]
 
         # 게임 설정 파일 백업 {game_name: (path, original_content)}
         self._config_backups: dict[str, tuple[str, str]] = {}
+        # 유저가 직접 지정한 설정 파일 경로 {game_name: path}
+        self._custom_config_paths: dict[str, str] = {}
 
         self._current_mode = "트래킹 1"
 
@@ -1071,17 +1197,75 @@ class MainWindow(QMainWindow):
         gs_lay.setContentsMargins(12, 8, 12, 8)
         gs_lay.setSpacing(10)
 
+        # 그리드샷 캔버스 + 일시정지 오버레이를 QStackedLayout으로 묶음
+        gs_canvas_frame = QFrame()
+        gs_canvas_frame.setStyleSheet("background:#dedad4; border-radius:6px;")
+        gs_stack = QStackedLayout(gs_canvas_frame)
+        gs_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        gs_stack.setContentsMargins(0, 0, 0, 0)
+
         self._gs_canvas = GridshotCanvas()
         self._gs_canvas._on_start = self._gs_start
         self._gs_canvas.on_result = self._gs_on_result
         # 초기 감도 동기화
         self._gs_canvas.set_sensitivity(2.50, yaw=0.022, dpi=800)
-        gs_lay.addWidget(self._gs_canvas, stretch=3)
+        gs_stack.addWidget(self._gs_canvas)
+
+        # 그리드샷 일시정지 오버레이 (트래킹과 동일 스타일)
+        self._gs_pause_overlay = QWidget(gs_canvas_frame)
+        self._gs_pause_overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._gs_pause_overlay.hide()
+        gp_lay = QVBoxLayout(self._gs_pause_overlay)
+        gp_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        gp_lay.setSpacing(14)
+
+        gp_title = QLabel("일시정지")
+        gp_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        gp_title.setStyleSheet(
+            "font-size:22px; font-weight:bold; color:#ffffff; letter-spacing:4px;"
+        )
+        gp_lay.addWidget(gp_title)
+        gp_lay.addSpacing(8)
+
+        gs_resume_btn = QPushButton("▶  계속하기")
+        gs_resume_btn.setFixedSize(200, 52)
+        gs_resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        gs_resume_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(30,30,30,220); color:#fff;
+                border: 2px solid #555; border-radius:26px;
+                font-size:15px; font-weight:bold;
+            }
+            QPushButton:hover  { background:rgba(60,60,60,235); border-color:#999; }
+            QPushButton:pressed { background:rgba(0,0,0,255); }
+        """)
+        gs_resume_btn.clicked.connect(self._gs_resume_session)
+        gp_lay.addWidget(gs_resume_btn)
+
+        gs_exit_btn = QPushButton("✕  프로그램 종료")
+        gs_exit_btn.setFixedSize(200, 52)
+        gs_exit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        gs_exit_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(160,20,20,210); color:#fff;
+                border: 2px solid #992222; border-radius:26px;
+                font-size:15px; font-weight:bold;
+            }
+            QPushButton:hover  { background:rgba(200,40,40,230); border-color:#cc4444; }
+            QPushButton:pressed { background:rgba(100,0,0,255); }
+        """)
+        gs_exit_btn.clicked.connect(QApplication.quit)
+        gp_lay.addWidget(gs_exit_btn)
+
+        gs_stack.addWidget(self._gs_pause_overlay)
+
+        gs_lay.addWidget(gs_canvas_frame, stretch=3)
         gs_lay.addWidget(self._make_gs_right_panel(), stretch=1)
         self._body_stack.addWidget(gridshot_page)   # index 1
 
         # 페이지 2: 감도 계산기
         self._sens_calc = SensCalcWidget()
+        self._sens_calc.on_apply = self._apply_from_calc
         self._body_stack.addWidget(self._sens_calc)  # index 2
 
 
@@ -1091,6 +1275,8 @@ class MainWindow(QMainWindow):
         # 시작 시 스핀박스 범위·감도·트래킹 모드를 첫 번째 게임에 맞게 초기화
         self._on_game_changed(0)
         self.canvas.tracking_mode = 2   # "트래킹 1" 버튼 선택 상태와 일치 (X축 왕복)
+        # 이전 세션 기록 복원
+        self._load_history()
 
     def _make_topbar(self):
         bar = QFrame()
@@ -1168,14 +1354,18 @@ class MainWindow(QMainWindow):
         elif selected == "감도 계산기":
             self._body_stack.setCurrentIndex(2)
             self._info_bar.hide()
+            # 메인 DPI를 계산기에 동기화
+            self._sens_calc.sync_dpi(self._dpi_spinbox.value())
 
     def _stop_all_sessions(self):
         """모든 세션 중지"""
         if self._running or self._paused:
             self._stop_session(show_result=False)
-        if self._gs_running:
+        if self._gs_running or self._gs_paused:
             self._gs_canvas.stop()
             self._gs_running = False
+            self._gs_paused  = False
+            self._gs_pause_overlay.hide()
 
     def _make_info_bar(self):
         self._info_bar = QFrame()
@@ -1284,11 +1474,13 @@ class MainWindow(QMainWindow):
         if cfg is None:
             return False, f"'{game_name}'은 자동 적용을 지원하지 않습니다."
 
-        # 경로 탐색
-        try:
-            path = cfg.get("path") or (cfg["path_fn"]() if "path_fn" in cfg else None)
-        except Exception:
-            path = None
+        # 경로 탐색 — 유저가 직접 지정한 경로 우선, 없으면 자동 탐색
+        path = self._custom_config_paths.get(game_name)
+        if not path:
+            try:
+                path = cfg.get("path") or (cfg["path_fn"]() if "path_fn" in cfg else None)
+            except Exception:
+                path = None
         if not path or not os.path.exists(path):
             return False, (
                 f"설정 파일을 찾을 수 없습니다.\n"
@@ -1371,6 +1563,9 @@ class MainWindow(QMainWindow):
         yaw  = GAME_YAW.get(name, 0.022)
         self.canvas.set_sensitivity(self._spinbox.value(), yaw=yaw, dpi=val)
         self._gs_canvas.set_sensitivity(self._spinbox.value(), yaw=yaw, dpi=val)
+        # 감도 계산기 탭이 열려 있으면 DPI 실시간 동기화
+        if self._current_mode == "감도 계산기":
+            self._sens_calc.sync_dpi(val)
 
     def _make_canvas_area(self):
         frame = QFrame()
@@ -1608,10 +1803,17 @@ class MainWindow(QMainWindow):
     # ── 키 입력 ──────────────────────────────
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
-            if self._running:
-                self._pause_session()
-            elif self._paused:
-                self._resume_session()
+            mode = self._current_mode
+            if mode in ("트래킹 1", "트래킹 2"):
+                if self._running:
+                    self._pause_session()
+                elif self._paused:
+                    self._resume_session()
+            elif mode == "그리드샷":
+                if self._gs_running:
+                    self._gs_pause_session()
+                elif self._gs_paused:
+                    self._gs_resume_session()
 
     # ── 트래킹 세션 동작 ─────────────────────
     def _toggle(self):
@@ -1656,8 +1858,8 @@ class MainWindow(QMainWindow):
 
         if show_result and self.canvas._total_frames > 0:
             r = self.canvas.session_result()
-            # 오차 히스토리 업데이트
             self._err_graph.push(r["hit_rate"], r["verdict"])
+            self._save_session(r)
             self._show_combined_result_dialog(r)
 
     def _reset(self):
@@ -1668,9 +1870,11 @@ class MainWindow(QMainWindow):
             for k, v in self._metrics.items():
                 v.setText(f"{SESSION_SECONDS}s" if k == "남은 시간" else "—")
         elif mode == "그리드샷":
-            if self._gs_running:
+            if self._gs_running or self._gs_paused:
                 self._gs_canvas.stop()
                 self._gs_running = False
+                self._gs_paused  = False
+                self._gs_pause_overlay.hide()
             for k, v in self._gs_metrics.items():
                 v.setText(f"{SESSION_SECONDS}s" if k == "남은 시간" else "—")
             self._gs_canvas.update()
@@ -1720,9 +1924,23 @@ class MainWindow(QMainWindow):
 
     # ── 그리드샷 세션 동작 ──────────────────
     def _gs_start(self):
-        if not self._gs_running:
+        if not self._gs_running and not self._gs_paused:
             self._gs_running = True
+            self._gs_paused  = False
             self._gs_canvas.start()
+
+    def _gs_pause_session(self):
+        self._gs_running = False
+        self._gs_paused  = True
+        self._gs_canvas.stop()
+        self._gs_pause_overlay.show()
+        self._gs_pause_overlay.raise_()
+
+    def _gs_resume_session(self):
+        self._gs_paused  = False
+        self._gs_running = True
+        self._gs_pause_overlay.hide()
+        self._gs_canvas.start_resume()
 
     def _gs_on_result(self, result: dict):
         """그리드샷 세션 종료 콜백"""
@@ -1820,7 +2038,7 @@ class MainWindow(QMainWindow):
         }
 
         dlg = QDialog(self)
-        dlg.setFixedSize(460, 740)
+        dlg.setFixedSize(460, 800)
         dlg.setStyleSheet("background:#1e1e1e; color:#fff;")
         dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
 
@@ -1962,23 +2180,96 @@ class MainWindow(QMainWindow):
 
         # 게임 설정 파일 적용 버튼
         game_name = GAME_PRESETS[self._game_combo.currentIndex()][0]
-        supported = GAME_CONFIG.get(game_name) is not None
+        cfg       = GAME_CONFIG.get(game_name)
+        supported = cfg is not None
+
+        # ── 경로 미리보기 (적용 전 실제 경로 표시) ──
+        # 유저 지정 경로 우선, 없으면 자동 탐색
+        _cur_path = [self._custom_config_paths.get(game_name)]
+        if not _cur_path[0] and supported:
+            try:
+                _cur_path[0] = cfg.get("path") or (cfg["path_fn"]() if "path_fn" in cfg else None)
+            except Exception:
+                _cur_path[0] = None
+
+        def _path_exists():
+            return bool(_cur_path[0] and os.path.exists(_cur_path[0]))
+
+        path_preview = QLabel()
+        path_preview.setWordWrap(True)
+        path_preview.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        def _refresh_path_ui():
+            """경로 라벨·적용 버튼 상태를 현재 _cur_path 기준으로 갱신"""
+            ok = _path_exists()
+            if not supported:
+                path_preview.setText(f"⚠  {game_name}은 자동 적용 미지원")
+                path_preview.setStyleSheet("font-size:9px; color:#555;")
+            elif ok:
+                is_custom = game_name in self._custom_config_paths
+                tag = " [직접 지정]" if is_custom else ""
+                path_preview.setText(f"📁  {_cur_path[0]}{tag}")
+                path_preview.setStyleSheet("font-size:9px; color:#5dcc77;")
+            else:
+                path_preview.setText(
+                    f"⚠  설정 파일을 찾을 수 없음\n"
+                    f"({'경로 탐색 실패' if not _cur_path[0] else _cur_path[0]})"
+                )
+                path_preview.setStyleSheet("font-size:9px; color:#ff8855;")
+            apply_btn.setEnabled(supported and ok)
+            _style = f"""
+                QPushButton {{
+                    background:{'#1a5c2a' if ok else '#2a2a2a'};
+                    color:{'#7dff9a' if ok else '#555'};
+                    border:1px solid {'#2d8c45' if ok else '#333'};
+                    border-radius:6px; font-size:12px; font-weight:bold;
+                }}
+                QPushButton:hover {{ background:#2a7a3a; }}
+                QPushButton:disabled {{ color:#444; }}
+            """
+            apply_btn.setStyleSheet(_style)
+
+        def _pick_file():
+            """파일 열기 다이얼로그로 설정 파일을 직접 지정"""
+            start_dir = os.path.dirname(_cur_path[0]) if _cur_path[0] else os.path.expanduser("~")
+            chosen, _ = QFileDialog.getOpenFileName(
+                dlg,
+                f"{game_name} 설정 파일 선택",
+                start_dir,
+                "설정 파일 (*.cfg *.ini *.txt *.profile PROFSAVE_profile);;모든 파일 (*.*)",
+            )
+            if chosen:
+                _cur_path[0] = chosen
+                self._custom_config_paths[game_name] = chosen
+                _refresh_path_ui()
+
+        # 경로 라벨 + "직접 선택" 버튼 가로 배치
+        path_row = QHBoxLayout()
+        path_row.setSpacing(6)
+        path_row.addWidget(path_preview, stretch=1)
+
+        pick_btn = QPushButton("📂")
+        pick_btn.setFixedSize(32, 28)
+        pick_btn.setToolTip("설정 파일을 직접 선택")
+        pick_btn.setStyleSheet("""
+            QPushButton {
+                background:#2a2a3a; color:#aaaaff;
+                border:1px solid #444; border-radius:5px; font-size:14px;
+            }
+            QPushButton:hover { background:#3a3a5a; border-color:#7777cc; }
+        """)
+        pick_btn.clicked.connect(_pick_file)
+        if supported:
+            path_row.addWidget(pick_btn, alignment=Qt.AlignmentFlag.AlignTop)
+
+        root.addLayout(path_row)
+        root.addSpacing(6)
 
         apply_btn = QPushButton(f"▶  {game_name} 설정 파일에 적용")
         apply_btn.setFixedHeight(38)
-        apply_btn.setEnabled(supported)
-        apply_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{'#1a5c2a' if supported else '#2a2a2a'};
-                color:{'#7dff9a' if supported else '#555'};
-                border:1px solid {'#2d8c45' if supported else '#333'};
-                border-radius:6px; font-size:12px; font-weight:bold;
-            }}
-            QPushButton:hover {{ background:#2a7a3a; }}
-            QPushButton:disabled {{ color:#444; }}
-        """)
+        apply_btn.setEnabled(False)   # _refresh_path_ui 에서 최종 결정
 
-        apply_status = QLabel("" if supported else f"⚠  {game_name}은 자동 적용 미지원")
+        apply_status = QLabel()
         apply_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         apply_status.setStyleSheet("font-size:10px; color:#666;")
         apply_status.setWordWrap(True)
@@ -2022,6 +2313,8 @@ class MainWindow(QMainWindow):
         restore_btn.clicked.connect(_do_restore)
 
         apply_btn.clicked.connect(_do_apply)
+        # 경로 라벨·버튼 초기 상태 반영 (apply_btn 생성 후 호출)
+        _refresh_path_ui()
 
         apply_row = QHBoxLayout(); apply_row.setSpacing(6)
         apply_row.addWidget(apply_btn, stretch=3)
@@ -2058,6 +2351,72 @@ class MainWindow(QMainWindow):
         root.addLayout(bottom)
 
         dlg.exec()
+
+    # ── 세션 기록 저장/불러오기 ──────────────────
+    def _save_session(self, r: dict):
+        """세션 결과를 JSON 파일에 누적 저장"""
+        entry = {
+            "timestamp":   time.strftime("%Y-%m-%d %H:%M:%S"),
+            "game":        GAME_PRESETS[self._game_combo.currentIndex()][0],
+            "mode":        self._current_mode,
+            "sensitivity": round(self._spinbox.value(), 6),
+            "dpi":         int(self._dpi_spinbox.value()),
+            "hit_rate":    round(r["hit_rate"],  2),
+            "avg_err":     round(r["avg_err"],   2),
+            "max_err":     round(r["max_err"],   2),
+            "osc_rate":    round(r["osc_rate"],  2),
+            "verdict":     r["verdict"],
+        }
+        history = self._load_history_raw()
+        history.append(entry)
+        try:
+            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_history_raw(self) -> list:
+        """파일에서 전체 기록 목록 반환 (실패 시 빈 리스트)"""
+        if not os.path.exists(HISTORY_FILE):
+            return []
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _load_history(self):
+        """앱 시작 시 최근 5회 세션을 그래프에 복원"""
+        history = self._load_history_raw()
+        # 트래킹 세션만 필터링
+        tracking = [e for e in history if e.get("mode") in ("트래킹 1", "트래킹 2")]
+        for entry in tracking[-5:]:
+            self._err_graph.push(entry.get("hit_rate", 0), entry.get("verdict", "적정"))
+
+    def _apply_from_calc(self, game_name: str, sens: float, dpi: float):
+        """감도 계산기 '적용' 버튼 → 메인 게임 콤보·감도·DPI 스핀박스 동기화"""
+        # 게임 콤보 변경
+        for i, (name, *_) in enumerate(GAME_PRESETS):
+            if name == game_name:
+                self._game_combo.blockSignals(True)
+                self._game_combo.setCurrentIndex(i)
+                self._game_combo.blockSignals(False)
+                break
+
+        # _on_game_changed 로 범위·step 재설정
+        idx = self._game_combo.currentIndex()
+        self._on_game_changed(idx)
+
+        # 감도 클램프 후 적용
+        clamped = max(self._spinbox.minimum(), min(self._spinbox.maximum(), sens))
+        self._spinbox.setValue(clamped)
+
+        # DPI 동기화
+        self._dpi_spinbox.setValue(dpi)
+
+        # 감도 계산기 → 트래킹 화면으로 전환
+        self._on_mode_changed("트래킹 1")
 
     def _add_sens_log(self, verdict: str, before: float, after: float, arrow: str):
         entry = f"{verdict}  {before:.2f} {arrow} {after:.2f}"

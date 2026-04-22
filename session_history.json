@@ -1,0 +1,14 @@
+[
+  {
+    "timestamp": "2026-04-22 02:03:29",
+    "game": "Apex Legends",
+    "mode": "트래킹 1",
+    "sensitivity": 2.5,
+    "dpi": 800,
+    "hit_rate": 47.47,
+    "avg_err": 24.28,
+    "max_err": 167.4,
+    "osc_rate": 4.58,
+    "verdict": "느림"
+  }
+]
