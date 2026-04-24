@@ -1127,6 +1127,257 @@ class ErrorGraphWidget(QWidget):
 
 
 # ────────────────────────────────────────────
+#  설정 다이얼로그 (게임 경로 관리)
+# ────────────────────────────────────────────
+class GamePathSettingsDialog(QDialog):
+    """모든 게임의 설정 파일 경로를 한 곳에서 관리하는 다이얼로그"""
+
+    _BTN_STYLE = """
+        QPushButton {{ background:{bg}; color:{fg};
+                      border:1px solid {bd}; border-radius:5px;
+                      font-size:13px; padding:0 4px; }}
+        QPushButton:hover {{ background:{hov}; }}
+        QPushButton:disabled {{ color:#444; background:#1a1a1a; border-color:#2a2a2a; }}
+    """
+
+    def __init__(self, parent, custom_paths: dict):
+        super().__init__(parent)
+        self._custom_paths = custom_paths   # MainWindow의 dict 참조
+        self._row_ui: dict[str, dict] = {}
+
+        self.setWindowTitle("게임 설정 파일 경로 관리")
+        self.setFixedSize(740, 600)
+        self.setStyleSheet("background:#1e1e1e; color:#fff;")
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 24, 28, 20)
+        root.setSpacing(0)
+
+        # 타이틀
+        title = QLabel("게임 설정 파일 경로 관리")
+        title.setStyleSheet("font-size:15px; font-weight:bold; color:#ddd; letter-spacing:1px;")
+        root.addWidget(title)
+        sub = QLabel("경로를 직접 지정하거나, 자동으로 다시 탐색할 수 있습니다.")
+        sub.setStyleSheet("font-size:10px; color:#666; margin-bottom:4px;")
+        root.addWidget(sub)
+        root.addSpacing(14)
+
+        # 헤더
+        hdr = QFrame()
+        hdr.setStyleSheet("background:#2a2a2a; border-radius:4px;")
+        hdr_lay = QHBoxLayout(hdr)
+        hdr_lay.setContentsMargins(16, 6, 16, 6)
+        for text, width in [("게임", 170), ("상태", 30), ("경로", 0), ("액션", 112)]:
+            lbl = QLabel(text)
+            lbl.setStyleSheet("font-size:10px; color:#888; letter-spacing:1px;")
+            if width:
+                lbl.setFixedWidth(width)
+            else:
+                lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            hdr_lay.addWidget(lbl)
+        root.addWidget(hdr)
+        root.addSpacing(4)
+
+        # 게임 행 목록
+        rows_frame = QFrame()
+        rows_frame.setStyleSheet("background:#151515; border-radius:6px;")
+        rows_lay = QVBoxLayout(rows_frame)
+        rows_lay.setContentsMargins(0, 4, 0, 4)
+        rows_lay.setSpacing(0)
+
+        for idx, (game_name, cfg) in enumerate(GAME_CONFIG.items()):
+            rows_lay.addWidget(self._make_row(game_name, cfg, idx))
+
+        root.addWidget(rows_frame, stretch=1)
+        root.addSpacing(16)
+
+        # 하단 버튼
+        foot = QHBoxLayout()
+        foot.addStretch()
+        all_detect_btn = QPushButton("🔍  전체 자동 탐색")
+        all_detect_btn.setFixedHeight(34)
+        all_detect_btn.setStyleSheet("""
+            QPushButton { background:#223344; color:#88aaff;
+                          border:1px solid #445566; border-radius:6px;
+                          font-size:12px; font-weight:bold; padding:0 14px; }
+            QPushButton:hover { background:#334466; }
+        """)
+        all_detect_btn.clicked.connect(self._detect_all)
+        foot.addWidget(all_detect_btn)
+        foot.addSpacing(8)
+
+        close_btn = QPushButton("닫기")
+        close_btn.setFixedHeight(34)
+        close_btn.setFixedWidth(90)
+        close_btn.setStyleSheet("""
+            QPushButton { background:#cc2222; color:#fff; border:none;
+                          border-radius:6px; font-size:13px; font-weight:bold; }
+            QPushButton:hover { background:#ee4444; }
+        """)
+        close_btn.clicked.connect(self.accept)
+        foot.addWidget(close_btn)
+        root.addLayout(foot)
+
+    def _make_row(self, game_name: str, cfg, idx: int) -> QWidget:
+        bg = "#1e1e1e" if idx % 2 == 0 else "#222222"
+        row = QFrame()
+        row.setStyleSheet(f"background:{bg};")
+        row.setFixedHeight(58)
+
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setSpacing(10)
+
+        # 게임 이름
+        name_lbl = QLabel(game_name)
+        name_lbl.setFixedWidth(170)
+        name_lbl.setStyleSheet("font-size:12px; font-weight:bold; color:#ccc;")
+        lay.addWidget(name_lbl)
+
+        # 상태 아이콘
+        status_lbl = QLabel("—")
+        status_lbl.setFixedWidth(30)
+        status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        status_lbl.setStyleSheet("font-size:14px; color:#555;")
+        lay.addWidget(status_lbl)
+
+        # 경로 텍스트
+        path_lbl = QLabel("—")
+        path_lbl.setStyleSheet("font-size:9px; color:#666;")
+        path_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        lay.addWidget(path_lbl, stretch=1)
+
+        # 액션 버튼 3개
+        detect_btn = QPushButton("🔍")
+        detect_btn.setFixedSize(32, 28)
+        detect_btn.setToolTip("자동 경로 탐색")
+        detect_btn.setStyleSheet(self._BTN_STYLE.format(
+            bg="#223344", fg="#88aaff", bd="#445566", hov="#334466"))
+
+        pick_btn = QPushButton("📂")
+        pick_btn.setFixedSize(32, 28)
+        pick_btn.setToolTip("파일 직접 선택")
+        pick_btn.setStyleSheet(self._BTN_STYLE.format(
+            bg="#2a2a3a", fg="#aaaaff", bd="#444466", hov="#3a3a5a"))
+
+        clear_btn = QPushButton("↺")
+        clear_btn.setFixedSize(32, 28)
+        clear_btn.setToolTip("직접 지정 경로 초기화")
+        clear_btn.setEnabled(False)
+        clear_btn.setStyleSheet(self._BTN_STYLE.format(
+            bg="#1a1a1a", fg="#555", bd="#2a2a2a", hov="#3a2a1a"))
+
+        if cfg is None:
+            for b in (detect_btn, pick_btn, clear_btn):
+                b.setEnabled(False)
+        else:
+            detect_btn.clicked.connect(lambda _, g=game_name, c=cfg: self._auto_detect(g, c))
+            pick_btn.clicked.connect(  lambda _, g=game_name, c=cfg: self._pick_file(g, c))
+            clear_btn.clicked.connect( lambda _, g=game_name, c=cfg: self._clear_path(g, c))
+
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(4)
+        btn_box.setContentsMargins(0, 0, 0, 0)
+        btn_box.addWidget(detect_btn)
+        btn_box.addWidget(pick_btn)
+        btn_box.addWidget(clear_btn)
+
+        lay.addLayout(btn_box)
+
+        self._row_ui[game_name] = {
+            "status_lbl": status_lbl,
+            "path_lbl":   path_lbl,
+            "clear_btn":  clear_btn,
+        }
+        self._refresh_row(game_name, cfg)
+        return row
+
+    # ── 경로 헬퍼 ────────────────────────────
+    def _resolved_path(self, game_name: str, cfg) -> str | None:
+        """커스텀 경로 우선, 없으면 자동 탐색"""
+        if game_name in self._custom_paths:
+            return self._custom_paths[game_name]
+        if cfg is None:
+            return None
+        try:
+            return cfg.get("path") or (cfg["path_fn"]() if "path_fn" in cfg else None)
+        except Exception:
+            return None
+
+    def _refresh_row(self, game_name: str, cfg):
+        ui = self._row_ui.get(game_name)
+        if not ui:
+            return
+
+        if cfg is None:
+            ui["status_lbl"].setText("—")
+            ui["status_lbl"].setStyleSheet("font-size:14px; color:#444;")
+            ui["path_lbl"].setText("자동 적용 미지원")
+            ui["path_lbl"].setStyleSheet("font-size:9px; color:#444;")
+            ui["clear_btn"].setEnabled(False)
+            return
+
+        path      = self._resolved_path(game_name, cfg)
+        is_custom = game_name in self._custom_paths
+        exists    = bool(path and os.path.exists(path))
+
+        if exists:
+            ui["status_lbl"].setText("✓")
+            ui["status_lbl"].setStyleSheet("font-size:14px; font-weight:bold; color:#44cc77;")
+            display = path if len(path) <= 65 else "…" + path[-62:]
+            tag = "  [직접 지정]" if is_custom else ""
+            ui["path_lbl"].setText(display + tag)
+            ui["path_lbl"].setStyleSheet(
+                "font-size:9px; color:#5dcc77;" if is_custom else "font-size:9px; color:#888;")
+        else:
+            ui["status_lbl"].setText("✗")
+            ui["status_lbl"].setStyleSheet("font-size:14px; font-weight:bold; color:#ff6644;")
+            if path:
+                display = path if len(path) <= 65 else "…" + path[-62:]
+                ui["path_lbl"].setText(display)
+            else:
+                ui["path_lbl"].setText("경로 탐색 실패")
+            ui["path_lbl"].setStyleSheet("font-size:9px; color:#ff8855;")
+
+        ui["clear_btn"].setEnabled(is_custom)
+        ui["clear_btn"].setStyleSheet(self._BTN_STYLE.format(
+            bg="#2a1a0a", fg="#ffaa66", bd="#664422", hov="#3a2a1a"
+        ) if is_custom else self._BTN_STYLE.format(
+            bg="#1a1a1a", fg="#555", bd="#2a2a2a", hov="#1a1a1a"
+        ))
+
+    # ── 액션 ─────────────────────────────────
+    def _auto_detect(self, game_name: str, cfg):
+        """커스텀 경로 유지하되 자동 탐색 결과만 미리보기 (커스텀 없을 때)"""
+        self._custom_paths.pop(game_name, None)
+        self._refresh_row(game_name, cfg)
+
+    def _pick_file(self, game_name: str, cfg):
+        current = self._resolved_path(game_name, cfg)
+        start   = os.path.dirname(current) if current else os.path.expanduser("~")
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, f"{game_name} 설정 파일 선택", start,
+            "설정 파일 (*.cfg *.ini *.txt *.profile PROFSAVE_profile);;모든 파일 (*.*)",
+        )
+        if chosen:
+            self._custom_paths[game_name] = chosen
+            self._refresh_row(game_name, cfg)
+
+    def _clear_path(self, game_name: str, cfg):
+        self._custom_paths.pop(game_name, None)
+        self._refresh_row(game_name, cfg)
+
+    def _detect_all(self):
+        """모든 게임 커스텀 경로 초기화 후 자동 탐색 결과 표시"""
+        for game_name, cfg in GAME_CONFIG.items():
+            self._custom_paths.pop(game_name, None)
+            self._refresh_row(game_name, cfg)
+
+
+# ────────────────────────────────────────────
 #  메인 윈도우
 # ────────────────────────────────────────────
 class MainWindow(QMainWindow):
@@ -1328,6 +1579,23 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(mode_bar)
         lay.addSpacing(8)
+
+        # ⚙ 설정 버튼 (게임 경로 관리)
+        settings_btn = QPushButton("⚙")
+        settings_btn.setFixedSize(28, 28)
+        settings_btn.setToolTip("게임 설정 파일 경로 관리")
+        settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #888;
+                border: 1px solid transparent; border-radius: 4px;
+                font-size: 15px;
+            }
+            QPushButton:hover { background: #dedad4; color: #333; border-color: #ccc; }
+        """)
+        settings_btn.clicked.connect(self._open_path_settings)
+        lay.addWidget(settings_btn)
+        lay.addSpacing(4)
         return bar
 
     def _on_mode_changed(self, selected: str):
@@ -2393,6 +2661,11 @@ class MainWindow(QMainWindow):
         tracking = [e for e in history if e.get("mode") in ("트래킹 1", "트래킹 2")]
         for entry in tracking[-5:]:
             self._err_graph.push(entry.get("hit_rate", 0), entry.get("verdict", "적정"))
+
+    def _open_path_settings(self):
+        """⚙ 버튼 → 게임 경로 관리 다이얼로그 열기"""
+        dlg = GamePathSettingsDialog(self, self._custom_config_paths)
+        dlg.exec()
 
     def _apply_from_calc(self, game_name: str, sens: float, dpi: float):
         """감도 계산기 '적용' 버튼 → 메인 게임 콤보·감도·DPI 스핀박스 동기화"""
