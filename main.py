@@ -73,24 +73,37 @@ def _all_steam_libraries() -> list[str]:
     """
     Steam의 모든 라이브러리 폴더 목록 반환.
     libraryfolders.vdf 를 파싱해 C: 외의 드라이브에 설치된 게임도 탐색.
+    VDF 파싱 실패 시 일반적인 설치 경로를 폴백으로 추가.
     """
     base = _steam_path()
     libraries = [base]
 
+    # VDF 파싱
     vdf_path = os.path.join(base, r"steamapps\libraryfolders.vdf")
-    if not os.path.exists(vdf_path):
-        return libraries
+    if os.path.exists(vdf_path):
+        try:
+            with open(vdf_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            # "path"  "D:\\Games\\Steam" 형식의 줄 추출 (단일/이중 역슬래시 모두 허용)
+            for match in re.finditer(r'"path"\s+"([^"]+)"', content):
+                folder = match.group(1).replace("\\\\", "\\").replace("/", "\\")
+                if folder not in libraries and os.path.isdir(folder):
+                    libraries.append(folder)
+        except Exception:
+            pass
 
-    try:
-        with open(vdf_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        # "path"  "D:\\Games\\Steam" 형식의 줄 추출
-        for match in re.finditer(r'"path"\s+"([^"]+)"', content):
-            folder = match.group(1).replace("\\\\", "\\")
-            if folder not in libraries:
-                libraries.append(folder)
-    except Exception:
-        pass
+    # VDF 파싱이 실패하거나 누락된 경우를 대비해 흔한 Steam 설치 경로를 직접 시도
+    _common_roots = [
+        r"C:\Program Files (x86)\Steam",
+        r"C:\Program Files\Steam",
+        r"D:\Steam",          r"D:\SteamLibrary",
+        r"E:\Steam",          r"E:\SteamLibrary",
+        r"F:\Steam",          r"F:\SteamLibrary",
+        r"G:\Steam",          r"G:\SteamLibrary",
+    ]
+    for root in _common_roots:
+        if root not in libraries and os.path.isdir(root):
+            libraries.append(root)
 
     return libraries
 
@@ -114,65 +127,117 @@ def _first_glob(pattern: str) -> str | None:
 
 # 게임별 설정 파일 정보
 #   path      : 고정 경로 (문자열)
-#   path_fn   : 동적 경로 탐색 함수 → str | None
-#   pattern   : 감도 줄을 찾는 정규식
-#   repl      : 치환 템플릿 ({val} 자리에 포맷된 값이 들어감)
-#   fmt       : 감도 값 → 문자열 변환 함수
-#   extra_pat : (선택) 추가로 같이 바꿀 패턴 목록 [(pattern, repl), ...]
+#   path_fn    : 동적 경로 탐색 함수 → str | None
+#   pattern    : 감도 줄을 찾는 정규식 (단일)
+#   patterns   : [(pattern, repl), ...] 목록 — 순서대로 시도, 처음 매칭된 것 사용
+#                (CS2처럼 파일 형식이 두 가지일 때 사용)
+#   repl       : 치환 템플릿 ({val} 자리에 포맷된 값이 들어감)
+#   fmt        : 감도 값 → 문자열 변환 함수
+#   extra_pat  : (선택) 추가로 같이 바꿀 패턴 목록 [(pattern, repl), ...]
 GAME_CONFIG = {
     "Apex Legends": {
-        "path":    os.path.expandvars(
+        "path":      os.path.expandvars(
             r"%USERPROFILE%\Saved Games\Respawn\Apex\profile\profile.cfg"),
-        "pattern": r'(mouse_sensitivity\s+)"[^"]*"',
-        "repl":    r'\g<1>"{val}"',
-        "fmt":     lambda v: f"{v:.6f}",
+        "path_hint": r"%USERPROFILE%\Saved Games\Respawn\Apex\profile\profile.cfg",
+        # profile.cfg 형식: mouse_sensitivity "1.500000"
+        "pattern":   r'(mouse_sensitivity\s+)"[^"]*"',
+        "repl":      r'\g<1>"{val}"',
+        "fmt":       lambda v: f"{v:.6f}",
     },
     "CS2": {
-        "path_fn": lambda: _find_in_steam(
-            r"steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\config.cfg"),
-        "pattern": r'(sensitivity\s+)"?([0-9.]+)"?',
-        "repl":    r'sensitivity "{val}"',
-        "fmt":     lambda v: f"{v:.6f}",
+        # cs2_user_convars_0.vcfg 우선, 없으면 config.cfg(구 CS:GO) 시도
+        "path_fn": lambda: (
+            _find_in_steam(
+                r"steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\cs2_user_convars_0.vcfg")
+            or _find_in_steam(
+                r"steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\config.cfg")
+        ),
+        "path_hint": r"[Steam]\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\cs2_user_convars_0.vcfg",
+        # 형식 1 (vcfg): "sensitivity"		"2.500000"  ← 키에 쌍따옴표
+        # 형식 2 (cfg) : sensitivity 2.5  또는  sensitivity "2.5"
+        "patterns": [
+            (r'"sensitivity"(\s+)"[0-9.]+"',        r'"sensitivity"\g<1>"{val}"'),
+            (r'(?<!["\w])(sensitivity)(\s+)"?[0-9.]+"?', r'\g<1>\g<2>"{val}"'),
+        ],
+        "fmt": lambda v: f"{v:.6f}",
     },
     "Valorant": {
-        "path_fn": lambda: _first_glob(os.path.expandvars(
-            r"%LOCALAPPDATA%\VALORANT\Saved\Config\Windows\*\GameUserSettings.ini")),
-        "pattern": r'(MouseSensitivity=)[^\r\n]*',
-        "repl":    r'\g<1>{val}',
-        "fmt":     lambda v: f"{v:.6f}",
+        # UUID 하위 폴더 포함 여러 경로 패턴 시도
+        "path_fn": lambda: (
+            _first_glob(os.path.expandvars(
+                r"%LOCALAPPDATA%\VALORANT\Saved\Config\Windows\*\GameUserSettings.ini"))
+            or _first_glob(os.path.expandvars(
+                r"%LOCALAPPDATA%\Riot Games\VALORANT\Saved\Config\Windows\*\GameUserSettings.ini"))
+            or _first_glob(os.path.expandvars(
+                r"%LOCALAPPDATA%\VALORANT\Saved\Config\*\GameUserSettings.ini"))
+        ),
+        "path_hint": r"%LOCALAPPDATA%\VALORANT\Saved\Config\Windows\{UUID}\GameUserSettings.ini",
+        # INI 형식: MouseSensitivity=0.786000
+        "pattern":   r'(MouseSensitivity=)[^\r\n]*',
+        "repl":      r'\g<1>{val}',
+        "fmt":       lambda v: f"{v:.6f}",
     },
     "Fortnite": {
-        "path_fn": lambda: os.path.expandvars(
-            r"%LOCALAPPDATA%\FortniteGame\Saved\Config\WindowsClient\GameUserSettings.ini"),
-        "pattern": r'(MouseSensitivity=)[^\r\n]*',
-        "repl":    r'\g<1>{val}',
-        "fmt":     lambda v: f"{v:.6f}",
+        "path_fn": lambda: _first_glob(os.path.expandvars(
+            r"%LOCALAPPDATA%\FortniteGame\Saved\Config\WindowsClient\GameUserSettings.ini")),
+        "path_hint": r"%LOCALAPPDATA%\FortniteGame\Saved\Config\WindowsClient\GameUserSettings.ini",
+        # INI 형식: MouseSensitivity=0.099000
+        "pattern":   r'(MouseSensitivity=)[^\r\n]*',
+        "repl":      r'\g<1>{val}',
+        "fmt":       lambda v: f"{v:.6f}",
         "extra_pat": [(r'(MouseTargetingMultiplier=)[^\r\n]*', r'\g<1>{val}')],
     },
     "PUBG": {
-        "path_fn": lambda: os.path.expandvars(
-            r"%LOCALAPPDATA%\TslGame\Saved\Config\WindowsNoEditor\GameUserSettings.ini"),
-        "pattern": r'(MouseSensitivity=)[^\r\n]*',
-        "repl":    r'\g<1>{val}',
-        "fmt":     lambda v: f"{v:.6f}",
+        # PUBG 설정은 Steam 설치 폴더가 아닌 %LOCALAPPDATA% 에 저장됨
+        "path_fn": lambda: _first_glob(os.path.expandvars(
+            r"%LOCALAPPDATA%\TslGame\Saved\Config\WindowsNoEditor\GameUserSettings.ini")),
+        "path_hint": r"%LOCALAPPDATA%\TslGame\Saved\Config\WindowsNoEditor\GameUserSettings.ini",
+        # INI 형식: MouseSensitivity=52.000000
+        "pattern":   r'(MouseSensitivity=)[^\r\n]*',
+        "repl":      r'\g<1>{val}',
+        "fmt":       lambda v: f"{v:.6f}",
     },
     "Rainbow Six Siege": {
-        "path_fn": lambda: _first_glob(os.path.expandvars(
-            r"%USERPROFILE%\Documents\My Games\Rainbow Six - Siege\*\GameSettings.ini")),
-        "pattern": r'(Mouse_H_Sensitivity=)[^\r\n]*',
-        "repl":    r'\g<1>{val}',
-        "fmt":     lambda v: f"{int(round(v))}",
+        "path_fn": lambda: (
+            _first_glob(os.path.expandvars(
+                r"%USERPROFILE%\Documents\My Games\Rainbow Six - Siege\*\GameSettings.ini"))
+            or _first_glob(os.path.expandvars(
+                r"%USERPROFILE%\Documents\My Games\Rainbow Six Siege\*\GameSettings.ini"))
+        ),
+        "path_hint": r"%USERPROFILE%\Documents\My Games\Rainbow Six - Siege\{UUID}\GameSettings.ini",
+        "pattern":   r'(Mouse_H_Sensitivity=)[^\r\n]*',
+        "repl":      r'\g<1>{val}',
+        "fmt":       lambda v: f"{int(round(v))}",
         "extra_pat": [(r'(Mouse_V_Sensitivity=)[^\r\n]*', r'\g<1>{val}')],
     },
     "Battlefield 2042": {
-        "path_fn": lambda: os.path.expandvars(
-            r"%USERPROFILE%\Documents\Battlefield 2042\settings\PROFSAVE_profile"),
-        "pattern": r'(GstInput\.MouseSensitivity\s+)\S+',
-        "repl":    r'\g<1>{val}',
-        "fmt":     lambda v: f"{v:.6f}",
+        "path_fn": lambda: (
+            _first_glob(os.path.expandvars(
+                r"%USERPROFILE%\Documents\Battlefield 2042\settings\PROFSAVE_profile"))
+            or _first_glob(os.path.expandvars(
+                r"%APPDATA%\Battlefield 2042\settings\PROFSAVE_profile"))
+        ),
+        "path_hint": r"%USERPROFILE%\Documents\Battlefield 2042\settings\PROFSAVE_profile",
+        "pattern":   r'(GstInput\.MouseSensitivity\s+)\S+',
+        "repl":      r'\g<1>{val}',
+        "fmt":       lambda v: f"{v:.6f}",
     },
-    "Overwatch 2":   None,   # Battle.net 암호화 저장 — 지원 불가
-    "Call of Duty":  None,   # 버전마다 경로 상이 — 지원 불가
+    "Overwatch 2": {
+        # 설치 시점·버전에 따라 Documents 하위 폴더명이 다를 수 있음
+        "path_fn": lambda: (
+            _first_glob(os.path.expandvars(
+                r"%USERPROFILE%\Documents\Overwatch 2\Settings\Settings_v0.ini"))
+            or _first_glob(os.path.expandvars(
+                r"%USERPROFILE%\Documents\Overwatch\Settings\Settings_v0.ini"))
+            or _first_glob(os.path.expandvars(
+                r"%PUBLIC%\Documents\Overwatch 2\Settings\Settings_v0.ini"))
+        ),
+        "path_hint": r"%USERPROFILE%\Documents\Overwatch 2\Settings\Settings_v0.ini",
+        "pattern":   r'(MouseSensitivity\s*=\s*")[^"]*"',
+        "repl":      r'\g<1>{val}"',
+        "fmt":       lambda v: f"{v:.6f}",
+    },
+    "Call of Duty":  None,   # 버전(MW/Warzone/BO 등)마다 경로·포맷 상이 — 지원 불가
 }
 
 
@@ -622,10 +687,11 @@ class GridshotCanvas(QWidget):
         self.update()
 
     def start_resume(self):
-        """일시정지 후 재개 — 카운트다운 타이머는 MainWindow가 관리"""
+        """일시정지 후 재개 — 타이머도 함께 재시작"""
         self.active = True
         self._last_raw_pos = None
         self.setCursor(Qt.CursorShape.BlankCursor)
+        self._timer.start(1000)   # 카운트다운 타이머 재개 (pause 시 stop() 했으므로 반드시 재시작)
         self.update()
 
     def session_result(self) -> dict:
@@ -1296,16 +1362,37 @@ class GamePathSettingsDialog(QDialog):
         return row
 
     # ── 경로 헬퍼 ────────────────────────────
+    def _auto_path(self, cfg) -> tuple[str | None, str | None]:
+        """
+        자동 탐색 실행 → (존재하는 경로 or None, 시도한/힌트 경로 or None).
+        파일이 없을 때도 '어디를 찾았는지' 알 수 있도록 tried_path를 반환.
+        path_fn이 None을 반환하면 cfg["path_hint"]를 tried_path로 사용.
+        """
+        if cfg is None:
+            return None, None
+        try:
+            if "path" in cfg:
+                tried = cfg["path"]
+                return (tried if os.path.exists(tried) else None), tried
+            if "path_fn" in cfg:
+                found = cfg["path_fn"]()
+                # path_fn이 경로를 찾은 경우 → 파일 존재 여부 확인 후 반환
+                if found:
+                    return (found if os.path.exists(found) else None), found
+                # path_fn이 None 반환 → 게임 미설치 or 경로 불일치
+                # path_hint가 있으면 "이 경로를 찾았지만 없었다"는 힌트 제공
+                hint = cfg.get("path_hint")
+                return None, hint  # hint가 없으면 None (기존 동작과 동일)
+        except Exception:
+            pass
+        return None, None
+
     def _resolved_path(self, game_name: str, cfg) -> str | None:
-        """커스텀 경로 우선, 없으면 자동 탐색"""
+        """커스텀 경로 우선, 없으면 자동 탐색 (존재하는 경로만 반환)"""
         if game_name in self._custom_paths:
             return self._custom_paths[game_name]
-        if cfg is None:
-            return None
-        try:
-            return cfg.get("path") or (cfg["path_fn"]() if "path_fn" in cfg else None)
-        except Exception:
-            return None
+        found, _ = self._auto_path(cfg)
+        return found
 
     def _refresh_row(self, game_name: str, cfg):
         ui = self._row_ui.get(game_name)
@@ -1320,26 +1407,37 @@ class GamePathSettingsDialog(QDialog):
             ui["clear_btn"].setEnabled(False)
             return
 
-        path      = self._resolved_path(game_name, cfg)
         is_custom = game_name in self._custom_paths
-        exists    = bool(path and os.path.exists(path))
+
+        if is_custom:
+            path   = self._custom_paths[game_name]
+            exists = os.path.exists(path)
+            tried  = path
+        else:
+            path, tried = self._auto_path(cfg)
+            exists = path is not None
+
+        def _trim(p): return p if len(p) <= 65 else "…" + p[-62:]
 
         if exists:
             ui["status_lbl"].setText("✓")
             ui["status_lbl"].setStyleSheet("font-size:14px; font-weight:bold; color:#44cc77;")
-            display = path if len(path) <= 65 else "…" + path[-62:]
             tag = "  [직접 지정]" if is_custom else ""
-            ui["path_lbl"].setText(display + tag)
+            ui["path_lbl"].setText(_trim(path) + tag)
             ui["path_lbl"].setStyleSheet(
                 "font-size:9px; color:#5dcc77;" if is_custom else "font-size:9px; color:#888;")
         else:
             ui["status_lbl"].setText("✗")
             ui["status_lbl"].setStyleSheet("font-size:14px; font-weight:bold; color:#ff6644;")
-            if path:
-                display = path if len(path) <= 65 else "…" + path[-62:]
-                ui["path_lbl"].setText(display)
+            if tried:
+                if is_custom or (not is_custom and "path" in (cfg or {})):
+                    # 고정 경로 또는 직접 지정 경로 → 파일 없음
+                    ui["path_lbl"].setText(f"파일 없음: {_trim(tried)}")
+                else:
+                    # path_fn이 None 반환 + hint만 있는 경우 → 게임 미설치 or 경로 불일치
+                    ui["path_lbl"].setText(f"게임 미설치 또는 경로 불일치\n탐색 위치: {_trim(tried)}")
             else:
-                ui["path_lbl"].setText("경로 탐색 실패")
+                ui["path_lbl"].setText("경로 탐색 실패 — 📂로 직접 지정하세요")
             ui["path_lbl"].setStyleSheet("font-size:9px; color:#ff8855;")
 
         ui["clear_btn"].setEnabled(is_custom)
@@ -1351,30 +1449,54 @@ class GamePathSettingsDialog(QDialog):
 
     # ── 액션 ─────────────────────────────────
     def _auto_detect(self, game_name: str, cfg):
-        """커스텀 경로 유지하되 자동 탐색 결과만 미리보기 (커스텀 없을 때)"""
+        """🔍: 커스텀 경로를 지우고 자동 탐색 재실행"""
         self._custom_paths.pop(game_name, None)
+        # "탐색 중…" 표시
+        ui = self._row_ui.get(game_name)
+        if ui:
+            ui["status_lbl"].setText("⟳")
+            ui["status_lbl"].setStyleSheet("font-size:14px; color:#888;")
+            ui["path_lbl"].setText("탐색 중…")
+            ui["path_lbl"].setStyleSheet("font-size:9px; color:#888;")
+        QApplication.processEvents()   # UI 즉시 갱신
         self._refresh_row(game_name, cfg)
 
     def _pick_file(self, game_name: str, cfg):
-        current = self._resolved_path(game_name, cfg)
+        """📂: 파일 탐색기로 직접 지정"""
+        found, tried = self._auto_path(cfg)
+        current = self._custom_paths.get(game_name) or found or tried
         start   = os.path.dirname(current) if current else os.path.expanduser("~")
         chosen, _ = QFileDialog.getOpenFileName(
             self, f"{game_name} 설정 파일 선택", start,
-            "설정 파일 (*.cfg *.ini *.txt *.profile PROFSAVE_profile);;모든 파일 (*.*)",
+            "설정 파일 (*.cfg *.vcfg *.ini *.txt *.profile PROFSAVE_profile);;모든 파일 (*.*)",
         )
         if chosen:
             self._custom_paths[game_name] = chosen
             self._refresh_row(game_name, cfg)
 
     def _clear_path(self, game_name: str, cfg):
+        """↺: 직접 지정 경로 초기화 → 자동 탐색으로 복귀"""
         self._custom_paths.pop(game_name, None)
         self._refresh_row(game_name, cfg)
 
     def _detect_all(self):
-        """모든 게임 커스텀 경로 초기화 후 자동 탐색 결과 표시"""
+        """🔍 전체: 모든 게임 커스텀 경로 초기화 후 자동 탐색 재실행"""
+        # 1단계: 모든 커스텀 경로 초기화 + 전체 행에 "탐색 중…" 표시
         for game_name, cfg in GAME_CONFIG.items():
             self._custom_paths.pop(game_name, None)
+            if cfg is not None:
+                ui = self._row_ui.get(game_name)
+                if ui:
+                    ui["status_lbl"].setText("⟳")
+                    ui["status_lbl"].setStyleSheet("font-size:14px; color:#888;")
+                    ui["path_lbl"].setText("탐색 중…")
+                    ui["path_lbl"].setStyleSheet("font-size:9px; color:#888;")
+        QApplication.processEvents()   # 화면에 즉시 반영
+
+        # 2단계: 게임마다 탐색 실행 후 즉시 UI 갱신
+        for game_name, cfg in GAME_CONFIG.items():
             self._refresh_row(game_name, cfg)
+            QApplication.processEvents()
 
 
 # ────────────────────────────────────────────
@@ -1742,26 +1864,34 @@ class MainWindow(QMainWindow):
         if cfg is None:
             return False, f"'{game_name}'은 자동 적용을 지원하지 않습니다."
 
-        # 경로 탐색 — 유저가 직접 지정한 경로 우선, 없으면 자동 탐색
+        # ── 경로 탐색: 유저 지정 경로 → 자동 탐색 순으로 시도 ──
         path = self._custom_config_paths.get(game_name)
         if not path:
             try:
                 path = cfg.get("path") or (cfg["path_fn"]() if "path_fn" in cfg else None)
-            except Exception:
-                path = None
-        if not path or not os.path.exists(path):
+            except Exception as e:
+                return False, f"경로 탐색 중 오류: {e}"
+
+        if not path:
+            hint = cfg.get("path_hint", "경로 미확인")
             return False, (
-                f"설정 파일을 찾을 수 없습니다.\n"
+                f"설정 파일 경로를 찾지 못했습니다.\n"
                 f"게임이 설치되어 있는지 확인하세요.\n"
-                f"({path or '경로 미확인'})"
+                f"예상 위치: {hint}"
+            )
+        if not os.path.exists(path):
+            return False, (
+                f"설정 파일이 존재하지 않습니다.\n"
+                f"게임을 한 번 이상 실행해 설정 파일을 생성하세요.\n"
+                f"경로: {path}"
             )
 
-        # 파일 읽기
+        # ── 파일 읽기 ──
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
         except Exception as e:
-            return False, f"파일 읽기 실패: {e}"
+            return False, f"파일 읽기 실패:\n{path}\n오류: {e}"
 
         # 최초 적용 시에만 원본 백업
         if game_name not in self._config_backups:
@@ -1774,21 +1904,61 @@ class MainWindow(QMainWindow):
             new_text, n = re.subn(pattern, repl, text)
             return new_text, n
 
-        new_content, count = do_replace(content, cfg["pattern"], cfg["repl"])
+        # ── 패턴 매칭 ──
+        # cfg에 "patterns" 리스트가 있으면 순서대로 시도 (CS2 vcfg/cfg 양식 대응)
+        # 없으면 단일 "pattern"/"repl" 사용
+        pattern_list = cfg.get("patterns")
+        if pattern_list:
+            new_content, count = content, 0
+            matched_pat = None
+            for pat, rep in pattern_list:
+                new_content, count = do_replace(content, pat, rep)
+                if count > 0:
+                    matched_pat = pat
+                    break
+        else:
+            new_content, count = do_replace(content, cfg["pattern"], cfg["repl"])
+            matched_pat = cfg.get("pattern")
+
         if count == 0:
-            return False, "설정 파일에서 감도 항목을 찾지 못했습니다.\n한 번 이상 게임을 실행한 뒤 다시 시도하세요."
+            # 파일 앞 200자를 메시지에 포함해 디버깅에 활용
+            preview = content[:200].replace("\n", "↵").replace("\t", "→")
+            return False, (
+                f"설정 파일에서 감도 항목을 찾지 못했습니다.\n"
+                f"게임을 한 번 이상 실행한 뒤 다시 시도하세요.\n\n"
+                f"파일 미리보기:\n{preview}"
+            )
 
         # 추가 패턴 (R6S 수직 감도 등)
         for pat, rep in cfg.get("extra_pat", []):
             new_content, _ = do_replace(new_content, pat, rep)
 
-        # 파일 쓰기
+        # ── 파일 쓰기 ──
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(new_content)
-            return True, f"감도 {val_str} 적용 완료\n({os.path.basename(path)})"
+        except PermissionError:
+            return False, (
+                f"파일 쓰기 권한 없음:\n{path}\n"
+                f"게임 실행 중이면 종료 후 다시 시도하세요."
+            )
         except Exception as e:
-            return False, f"파일 쓰기 실패: {e}"
+            return False, f"파일 쓰기 실패:\n{path}\n오류: {e}"
+
+        # ── 쓰기 후 검증: 실제로 값이 바뀌었는지 재확인 ──
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                verify = f.read()
+            if val_str not in verify:
+                return False, (
+                    f"파일 쓰기는 성공했지만 값 확인 실패.\n"
+                    f"({val_str}이 파일에서 발견되지 않음)\n"
+                    f"원본이 복구됩니다."
+                )
+        except Exception:
+            pass  # 검증 실패는 무시 (쓰기 자체는 성공)
+
+        return True, f"감도 {val_str} 적용 완료\n({os.path.basename(path)})"
 
     def _restore_config(self) -> tuple[bool, str]:
         """현재 게임의 설정 파일을 적용 전 원본으로 복구"""
@@ -1814,7 +1984,7 @@ class MainWindow(QMainWindow):
         self._spinbox.blockSignals(True)
         self._spinbox.setRange(lo, hi)
         self._spinbox.setSingleStep(step)
-        self._spinbox.setDecimals(2 if step < 1 else 0)
+        self._spinbox.setDecimals(3 if step < 0.01 else 2 if step < 1 else 0)
         self._spinbox.setValue(default)
         self._spinbox.blockSignals(False)
         self.canvas.set_sensitivity(default, yaw=yaw, dpi=self._dpi_spinbox.value())
