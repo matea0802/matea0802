@@ -120,6 +120,21 @@ def _find_in_steam(relative: str) -> str | None:
     return None
 
 
+def _find_cs2_config() -> str | None:
+    """
+    CS2 유저 설정 파일 탐색.
+    실제 경로: Steam/userdata/{SteamUID}/730/local/cfg/cs2_user_convars_0_slot0.vcfg
+    게임 설치 폴더(steamapps/common/...)가 아니라 userdata에 저장됨.
+    """
+    for lib in _all_steam_libraries():
+        for filename in ["cs2_user_convars_0_slot0.vcfg", "cs2_user_convars_0.vcfg"]:
+            pattern = os.path.join(lib, "userdata", "*", "730", "local", "cfg", filename)
+            result = _first_glob(pattern)
+            if result:
+                return result
+    return None
+
+
 def _first_glob(pattern: str) -> str | None:
     matches = glob.glob(pattern)
     return matches[0] if matches else None
@@ -145,18 +160,15 @@ GAME_CONFIG = {
         "fmt":       lambda v: f"{v:.6f}",
     },
     "CS2": {
-        # cs2_user_convars_0.vcfg 우선, 없으면 config.cfg(구 CS:GO) 시도
-        "path_fn": lambda: (
-            _find_in_steam(
-                r"steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\cs2_user_convars_0.vcfg")
-            or _find_in_steam(
-                r"steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\config.cfg")
-        ),
-        "path_hint": r"[Steam]\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\cs2_user_convars_0.vcfg",
-        # 형식 1 (vcfg): "sensitivity"		"2.500000"  ← 키에 쌍따옴표
-        # 형식 2 (cfg) : sensitivity 2.5  또는  sensitivity "2.5"
+        # 실제 경로: Steam/userdata/{UID}/730/local/cfg/cs2_user_convars_0_slot0.vcfg
+        # (게임 설치 폴더가 아니라 Steam userdata 폴더에 저장됨)
+        "path_fn": _find_cs2_config,
+        "path_hint": r"[Steam]\userdata\{UID}\730\local\cfg\cs2_user_convars_0_slot0.vcfg",
+        # vcfg 형식: "config" > "convars" > "sensitivity"		"2.500000"
         "patterns": [
-            (r'"sensitivity"(\s+)"[0-9.]+"',        r'"sensitivity"\g<1>"{val}"'),
+            # vcfg (CS2): "sensitivity"<TAB><TAB>"2.500000"
+            (r'"sensitivity"(\s+)"[0-9.]+"', r'"sensitivity"\g<1>"{val}"'),
+            # cfg (구 CS:GO): sensitivity 2.5 또는 sensitivity "2.5"
             (r'(?<!["\w])(sensitivity)(\s+)"?[0-9.]+"?', r'\g<1>\g<2>"{val}"'),
         ],
         "fmt": lambda v: f"{v:.6f}",
