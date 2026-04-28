@@ -155,9 +155,12 @@ GAME_CONFIG = {
             r"%USERPROFILE%\Saved Games\Respawn\Apex\profile\profile.cfg"),
         "path_hint": r"%USERPROFILE%\Saved Games\Respawn\Apex\profile\profile.cfg",
         # profile.cfg 형식: mouse_sensitivity "1.500000"
-        "pattern":   r'(mouse_sensitivity\s+)"[^"]*"',
-        "repl":      r'\g<1>"{val}"',
-        "fmt":       lambda v: f"{v:.6f}",
+        # ※ 이 키는 게임에서 직접 변경한 적 없으면 파일에 없음
+        #   → append_tmpl 로 파일 끝에 추가
+        "pattern":       r'(mouse_sensitivity\s+)"[^"]*"',
+        "repl":          r'\g<1>"{val}"',
+        "fmt":           lambda v: f"{v:.6f}",
+        "append_tmpl":   'mouse_sensitivity "{val}"\n',
     },
     "CS2": {
         # 실제 경로: Steam/userdata/{UID}/730/local/cfg/cs2_user_convars_0_slot0.vcfg
@@ -193,19 +196,22 @@ GAME_CONFIG = {
         "path_fn": lambda: _first_glob(os.path.expandvars(
             r"%LOCALAPPDATA%\FortniteGame\Saved\Config\WindowsClient\GameUserSettings.ini")),
         "path_hint": r"%LOCALAPPDATA%\FortniteGame\Saved\Config\WindowsClient\GameUserSettings.ini",
-        # INI 형식: MouseSensitivity=0.099000
-        "pattern":   r'(MouseSensitivity=)[^\r\n]*',
+        # INI 독립 줄: MouseSensitivity=0.099000
+        # [^\r\n]* 대신 [0-9.]+ 로 숫자만 교체 (뒤에 오는 데이터 보존)
+        "pattern":   r'(MouseSensitivity=)([0-9.]+)',
         "repl":      r'\g<1>{val}',
         "fmt":       lambda v: f"{v:.6f}",
-        "extra_pat": [(r'(MouseTargetingMultiplier=)[^\r\n]*', r'\g<1>{val}')],
+        "extra_pat": [(r'(MouseTargetingMultiplier=)([0-9.]+)', r'\g<1>{val}')],
     },
     "PUBG": {
         # PUBG 설정은 Steam 설치 폴더가 아닌 %LOCALAPPDATA% 에 저장됨
+        # ※ GameUserSettings.ini 내 MouseSensitivity= 는 독립 줄이 아닌 TslPersistantData
+        #   구조체 안에 내장됨. [^\r\n]* 를 쓰면 구조체 전체를 지워 파일 손상 발생!
+        #   → 숫자값([0-9.]+)만 정확히 교체
         "path_fn": lambda: _first_glob(os.path.expandvars(
             r"%LOCALAPPDATA%\TslGame\Saved\Config\WindowsNoEditor\GameUserSettings.ini")),
         "path_hint": r"%LOCALAPPDATA%\TslGame\Saved\Config\WindowsNoEditor\GameUserSettings.ini",
-        # INI 형식: MouseSensitivity=52.000000
-        "pattern":   r'(MouseSensitivity=)[^\r\n]*',
+        "pattern":   r'(MouseSensitivity=)([0-9.]+)',
         "repl":      r'\g<1>{val}',
         "fmt":       lambda v: f"{v:.6f}",
     },
@@ -217,10 +223,11 @@ GAME_CONFIG = {
                 r"%USERPROFILE%\Documents\My Games\Rainbow Six Siege\*\GameSettings.ini"))
         ),
         "path_hint": r"%USERPROFILE%\Documents\My Games\Rainbow Six - Siege\{UUID}\GameSettings.ini",
-        "pattern":   r'(Mouse_H_Sensitivity=)[^\r\n]*',
+        # INI 독립 줄: Mouse_H_Sensitivity=10  (정수)
+        "pattern":   r'(Mouse_H_Sensitivity=)([0-9.]+)',
         "repl":      r'\g<1>{val}',
         "fmt":       lambda v: f"{int(round(v))}",
-        "extra_pat": [(r'(Mouse_V_Sensitivity=)[^\r\n]*', r'\g<1>{val}')],
+        "extra_pat": [(r'(Mouse_V_Sensitivity=)([0-9.]+)', r'\g<1>{val}')],
     },
     "Battlefield 2042": {
         "path_fn": lambda: (
@@ -1933,13 +1940,20 @@ class MainWindow(QMainWindow):
             matched_pat = cfg.get("pattern")
 
         if count == 0:
-            # 파일 앞 200자를 메시지에 포함해 디버깅에 활용
-            preview = content[:200].replace("\n", "↵").replace("\t", "→")
-            return False, (
-                f"설정 파일에서 감도 항목을 찾지 못했습니다.\n"
-                f"게임을 한 번 이상 실행한 뒤 다시 시도하세요.\n\n"
-                f"파일 미리보기:\n{preview}"
-            )
+            append_tmpl = cfg.get("append_tmpl")
+            if append_tmpl:
+                # 키가 없는 경우 파일 끝에 추가 (Apex Legends 등)
+                append_line = append_tmpl.replace("{val}", val_str)
+                new_content = content + ("" if content.endswith("\n") else "\n") + append_line
+                count = 1
+            else:
+                # 파일 앞 200자를 메시지에 포함해 디버깅에 활용
+                preview = content[:200].replace("\n", "↵").replace("\t", "→")
+                return False, (
+                    f"설정 파일에서 감도 항목을 찾지 못했습니다.\n"
+                    f"게임을 한 번 이상 실행한 뒤 다시 시도하세요.\n\n"
+                    f"파일 미리보기:\n{preview}"
+                )
 
         # 추가 패턴 (R6S 수직 감도 등)
         for pat, rep in cfg.get("extra_pat", []):
