@@ -1,0 +1,74 @@
+[
+  {
+    "timestamp": "2026-04-22 02:03:29",
+    "game": "Apex Legends",
+    "mode": "트래킹 1",
+    "sensitivity": 2.5,
+    "dpi": 800,
+    "hit_rate": 47.47,
+    "avg_err": 24.28,
+    "max_err": 167.4,
+    "osc_rate": 4.58,
+    "verdict": "느림"
+  },
+  {
+    "timestamp": "2026-04-24 15:56:13",
+    "game": "Apex Legends",
+    "mode": "트래킹 1",
+    "sensitivity": 2.5,
+    "dpi": 800,
+    "hit_rate": 39.41,
+    "avg_err": 27.78,
+    "max_err": 325.69,
+    "osc_rate": 4.37,
+    "verdict": "느림"
+  },
+  {
+    "timestamp": "2026-05-02 11:23:56",
+    "game": "Apex Legends",
+    "mode": "트래킹 1",
+    "sensitivity": 2.5,
+    "dpi": 800,
+    "hit_rate": 5.31,
+    "avg_err": 544.27,
+    "max_err": 1275.24,
+    "osc_rate": 1.02,
+    "verdict": "느림"
+  },
+  {
+    "timestamp": "2026-05-02 11:26:52",
+    "game": "Apex Legends",
+    "mode": "트래킹 1",
+    "sensitivity": 2.0,
+    "dpi": 800,
+    "hit_rate": 78.19,
+    "avg_err": 16.15,
+    "max_err": 281.01,
+    "osc_rate": 5.33,
+    "verdict": "적정"
+  },
+  {
+    "timestamp": "2026-05-02 11:27:45",
+    "game": "Apex Legends",
+    "mode": "트래킹 1",
+    "sensitivity": 2.03,
+    "dpi": 800,
+    "hit_rate": 84.2,
+    "avg_err": 10.08,
+    "max_err": 54.02,
+    "osc_rate": 8.91,
+    "verdict": "적정"
+  },
+  {
+    "timestamp": "2026-05-02 12:32:44",
+    "game": "Apex Legends",
+    "mode": "트래킹 1",
+    "sensitivity": 2.5,
+    "dpi": 800,
+    "hit_rate": 5.13,
+    "avg_err": 713.61,
+    "max_err": 1660.56,
+    "osc_rate": 1.39,
+    "verdict": "느림"
+  }
+]

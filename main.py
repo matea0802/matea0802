@@ -33,27 +33,79 @@ BASELINE = 800 * 1.5 * 0.022   # ≈ 26.4
 # 세션 기록 저장 파일 (스크립트와 같은 디렉터리)
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session_history.json")
 
-# ── 공통 스타일시트 ──────────────────────────────────────────
-_SPINBOX_STYLE = """
-    QDoubleSpinBox {{
-        font-size: {size}px; font-weight: bold; color: #333;
-        background: transparent; border: none;
-        border-bottom: 2px solid #bbb; padding-bottom: 2px;
-    }}
-    QDoubleSpinBox:focus {{ border-bottom-color: #555; }}
-    QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 18px; }}
-"""
+# ── 테마 팔레트 ──────────────────────────────────────────────
+_THEMES = {
+    "light": {
+        "bg":     "#f0ede8",   # 메인 배경
+        "bg2":    "#e8e4de",   # 패널 배경
+        "bg3":    "#dedad4",   # 강조/캔버스 프레임
+        "bg4":    "#eae6e0",   # info bar
+        "border": "#d0ccc6",
+        "sep":    "#c0bcb6",   # 세로 구분선
+        "txt":    "#222222",
+        "txt2":   "#555555",
+        "txt3":   "#666666",
+        "txt4":   "#888888",
+        "txt5":   "#999999",
+        "canvas": "#f5f5f0",
+        "cb_bg":  "#f0ede8",   # 콤보박스 드롭다운 배경
+        "cb_sel": "#dedad4",
+        "sp_c":   "#333333",   # spinbox 글자색
+        "sp_b":   "#bbbbbb",   # spinbox 밑줄
+        "sp_f":   "#555555",   # spinbox focus 밑줄
+    },
+    "dark": {
+        "bg":     "#1a1a1a",
+        "bg2":    "#242424",
+        "bg3":    "#2e2e2e",
+        "bg4":    "#202020",
+        "border": "#383838",
+        "sep":    "#444444",
+        "txt":    "#e0e0e0",
+        "txt2":   "#bbbbbb",
+        "txt3":   "#999999",
+        "txt4":   "#777777",
+        "txt5":   "#555555",
+        "canvas": "#1e1e1e",
+        "cb_bg":  "#2a2a2a",
+        "cb_sel": "#3a3a3a",
+        "sp_c":   "#dddddd",
+        "sp_b":   "#555555",
+        "sp_f":   "#aaaaaa",
+    },
+}
+_cur_theme = "light"
 
-_DARK_BTN_STYLE = """
-    QPushButton {{ background:{bg}; color:#fff; border:none;
-                  border-radius:6px; font-size:12px; font-weight:bold; }}
-    QPushButton:hover {{ background:{hov}; }}
-"""
+def _p() -> dict:
+    # 현재 테마 팔레트 반환
+    return _THEMES[_cur_theme]
 
+def _spinbox_style(size: int) -> str:
+    p = _p()
+    return (
+        f"QDoubleSpinBox {{ font-size:{size}px; font-weight:bold; color:{p['sp_c']};"
+        f" background:transparent; border:none;"
+        f" border-bottom:2px solid {p['sp_b']}; padding-bottom:2px; }}"
+        f"QDoubleSpinBox:focus {{ border-bottom-color:{p['sp_f']}; }}"
+        f"QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width:18px; }}"
+    )
+
+def _combo_style(size: int) -> str:
+    p = _p()
+    return (
+        f"QComboBox {{ font-size:{size}px; font-weight:bold; color:{p['sp_c']};"
+        f" background:transparent; border:none;"
+        f" border-bottom:2px solid {p['sp_b']}; padding-bottom:2px; }}"
+        f"QComboBox:focus {{ border-bottom-color:{p['sp_f']}; }}"
+        f"QComboBox::drop-down {{ border:none; width:20px; }}"
+        f"QComboBox QAbstractItemView {{ background:{p['cb_bg']}; border:1px solid {p['border']};"
+        f" color:{p['txt']}; selection-background-color:{p['cb_sel']};"
+        f" selection-color:{p['txt']}; font-size:{size}px; }}"
+    )
 
 # ── 게임 설정 파일 자동 적용 헬퍼 ──────────────────────────
 def _steam_path() -> str:
-    """Steam 설치 경로를 레지스트리에서 탐색"""
+    # Steam 설치 경로를 레지스트리에서 탐색
     if _HAS_WINREG:
         for hive, sub in [
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
@@ -70,11 +122,9 @@ def _steam_path() -> str:
 
 
 def _all_steam_libraries() -> list[str]:
-    """
-    Steam의 모든 라이브러리 폴더 목록 반환.
-    libraryfolders.vdf 를 파싱해 C: 외의 드라이브에 설치된 게임도 탐색.
-    VDF 파싱 실패 시 일반적인 설치 경로를 폴백으로 추가.
-    """
+    # Steam의 모든 라이브러리 폴더 목록 반환
+    # libraryfolders.vdf를 파싱해 C: 외의 드라이브에 설치된 게임도 탐색
+    # VDF 파싱 실패 시 일반적인 설치 경로를 폴백으로 추가
     base = _steam_path()
     libraries = [base]
 
@@ -109,10 +159,7 @@ def _all_steam_libraries() -> list[str]:
 
 
 def _find_in_steam(relative: str) -> str | None:
-    """
-    모든 Steam 라이브러리에서 relative 경로(steamapps\common\... 형식)를 탐색.
-    존재하는 첫 번째 경로 반환, 없으면 None.
-    """
+    # 모든 Steam 라이브러리에서 relative 경로를 탐색, 존재하는 첫 번째 경로 반환
     for lib in _all_steam_libraries():
         candidate = os.path.join(lib, relative)
         if os.path.exists(candidate):
@@ -121,11 +168,7 @@ def _find_in_steam(relative: str) -> str | None:
 
 
 def _find_cs2_config() -> str | None:
-    """
-    CS2 유저 설정 파일 탐색.
-    실제 경로: Steam/userdata/{SteamUID}/730/local/cfg/cs2_user_convars_0_slot0.vcfg
-    게임 설치 폴더(steamapps/common/...)가 아니라 userdata에 저장됨.
-    """
+    # CS2 유저 설정 파일 탐색 (userdata/{SteamUID}/730/local/cfg/ 경로)
     for lib in _all_steam_libraries():
         for filename in ["cs2_user_convars_0_slot0.vcfg", "cs2_user_convars_0.vcfg"]:
             pattern = os.path.join(lib, "userdata", "*", "730", "local", "cfg", filename)
@@ -267,7 +310,7 @@ GAME_YAW = {
     "CS2":                0.022,
     "Overwatch 2":        0.0066,
     "Fortnite":           0.5555,
-    "PUBG":               0.001054,
+    "PUBG":               0.002222,
     "Rainbow Six Siege":  0.00573,
     "Call of Duty":       0.0066,
     "Battlefield 2042":   0.001813,
@@ -280,7 +323,7 @@ GAME_PRESETS = [
     ("CS2",               2.50,  0.10, 10.00, 0.05),
     ("Overwatch 2",       8.33,  1.00,100.00, 0.01),
     ("Fortnite",          0.099, 0.001, 1.00, 0.001),
-    ("PUBG",             52.00,  1.00,500.00, 1.00),
+    ("PUBG",             50.00,  0.00,100.00, 1.00),
     ("Rainbow Six Siege",10.00,  1.00,100.00, 1.00),
     ("Call of Duty",      8.33,  1.00, 20.00, 0.01),
     ("Battlefield 2042", 30.30,  1.00,100.00, 0.10),
@@ -288,7 +331,7 @@ GAME_PRESETS = [
 
 
 class _ClickOverlay(QWidget):
-    """클릭하면 on_click 콜백을 호출하는 투명 오버레이"""
+    # 클릭하면 on_click 콜백을 호출하는 투명 오버레이
     def __init__(self, parent=None, on_click=None):
         super().__init__(parent)
         self._on_click = on_click
@@ -404,7 +447,7 @@ class TrackingCanvas(QWidget):
         self._timer.start(int(self._dt * 1000))
 
     def _normalize_dir(self):
-        l = math.sqrt(self.move_dir.x() ** 2 + self.move_dir.y() ** 2)
+        l = math.hypot(self.move_dir.x(), self.move_dir.y())
         if l > 0:
             self.move_dir = QPointF(self.move_dir.x() / l, self.move_dir.y() / l)
 
@@ -501,9 +544,10 @@ class TrackingCanvas(QWidget):
         self._last_raw_pos = None
 
     def error_distance(self) -> float:
-        dx = self.target_pos.x() - self._virtual_cursor.x()
-        dy = self.target_pos.y() - self._virtual_cursor.y()
-        return math.sqrt(dx * dx + dy * dy)
+        return math.hypot(
+            self.target_pos.x() - self._virtual_cursor.x(),
+            self.target_pos.y() - self._virtual_cursor.y(),
+        )
 
     def session_result(self) -> dict:
         total    = self._total_frames or 1
@@ -656,7 +700,7 @@ class GridshotCanvas(QWidget):
         return (self.dpi * self.sensitivity * self.game_yaw) / BASELINE
 
     def _build_grid(self):
-        """캔버스 크기 기반으로 격자 위치 계산"""
+        # 캔버스 크기 기반으로 격자 위치 계산
         self._grid_positions = []
         w = self.width()
         h = self.height()
@@ -671,7 +715,7 @@ class GridshotCanvas(QWidget):
                 self._grid_positions.append(QPointF(cx, cy))
 
     def _pick_next(self):
-        """현재와 다른 랜덤 인덱스 선택"""
+        # 현재와 다른 랜덤 인덱스 선택
         n = len(self._grid_positions)
         if n == 0:
             return
@@ -706,7 +750,7 @@ class GridshotCanvas(QWidget):
         self.update()
 
     def start_resume(self):
-        """일시정지 후 재개 — 타이머도 함께 재시작"""
+        # 일시정지 후 재개 — 타이머도 함께 재시작
         self.active = True
         self._last_raw_pos = None
         self.setCursor(Qt.CursorShape.BlankCursor)
@@ -723,7 +767,7 @@ class GridshotCanvas(QWidget):
         )
 
     def _tick(self):
-        """1초마다 카운트다운"""
+        # 1초마다 카운트다운
         if not self.active:
             return
         self.remaining -= 1
@@ -746,11 +790,7 @@ class GridshotCanvas(QWidget):
 
         if self._active_idx >= 0 and self._active_idx < len(self._grid_positions):
             target = self._grid_positions[self._active_idx]
-            dx = vx - target.x()
-            dy = vy - target.y()
-            dist = math.sqrt(dx * dx + dy * dy)
-
-            if dist <= self.TARGET_R:
+            if math.hypot(vx - target.x(), vy - target.y()) <= self.TARGET_R:
                 # 히트
                 react = time.perf_counter() - self._last_hit_time
                 self._react_times.append(react)
@@ -762,9 +802,7 @@ class GridshotCanvas(QWidget):
                 for i, pos in enumerate(self._grid_positions):
                     if i == self._active_idx:
                         continue
-                    dx2 = vx - pos.x()
-                    dy2 = vy - pos.y()
-                    if math.sqrt(dx2 * dx2 + dy2 * dy2) <= self.TARGET_R:
+                    if math.hypot(vx - pos.x(), vy - pos.y()) <= self.TARGET_R:
                         hit_other = True
                         break
                 if not hit_other:
@@ -869,7 +907,6 @@ class GridshotCanvas(QWidget):
 class SensCalcWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet("background:#f0ede8;")
         # 메인 윈도우가 연결할 콜백: on_apply(game_name, sens, dpi)
         self.on_apply = None
 
@@ -878,101 +915,82 @@ class SensCalcWidget(QWidget):
         root.setSpacing(24)
 
         # ── 좌측: 입력 패널 ──────────────────────
-        left_panel = QFrame()
-        left_panel.setFixedWidth(300)
-        left_panel.setStyleSheet(
-            "background:#e8e4de; border-radius:8px;"
-        )
-        left_lay = QVBoxLayout(left_panel)
+        self._sc_left_panel = QFrame()
+        self._sc_left_panel.setFixedWidth(300)
+        left_lay = QVBoxLayout(self._sc_left_panel)
         left_lay.setContentsMargins(20, 20, 20, 20)
         left_lay.setSpacing(16)
 
-        title_l = QLabel("입력")
-        title_l.setStyleSheet("font-size:12px; color:#888; letter-spacing:2px;")
-        left_lay.addWidget(title_l)
+        self._sc_title_lbl = QLabel("입력")
+        left_lay.addWidget(self._sc_title_lbl)
 
         # 게임 선택
-        game_lbl = QLabel("게임 선택")
-        game_lbl.setStyleSheet("font-size:10px; color:#888;")
-        left_lay.addWidget(game_lbl)
+        self._sc_game_lbl = QLabel("게임 선택")
+        left_lay.addWidget(self._sc_game_lbl)
 
         self._sc_game_combo = QComboBox()
         for name, *_ in GAME_PRESETS:
             self._sc_game_combo.addItem(name)
-        self._sc_game_combo.setStyleSheet("""
-            QComboBox {
-                font-size:15px; font-weight:bold; color:#333;
-                background:transparent; border:none;
-                border-bottom:2px solid #bbb; padding-bottom:2px;
-            }
-            QComboBox:focus { border-bottom-color:#555; }
-            QComboBox::drop-down { border:none; width:20px; }
-            QComboBox QAbstractItemView {
-                background:#f0ede8; border:1px solid #ccc;
-                color:#222; selection-background-color:#dedad4;
-                selection-color:#111; font-size:14px;
-            }
-        """)
         self._sc_game_combo.currentIndexChanged.connect(self._on_sc_game_changed)
         left_lay.addWidget(self._sc_game_combo)
 
-        sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
-        sep1.setStyleSheet("color:#d0ccc6;")
-        left_lay.addWidget(sep1)
+        self._sc_sep1 = QFrame(); self._sc_sep1.setFrameShape(QFrame.Shape.HLine)
+        left_lay.addWidget(self._sc_sep1)
 
         # 감도 입력
-        sens_lbl = QLabel("감도")
-        sens_lbl.setStyleSheet("font-size:10px; color:#888;")
-        left_lay.addWidget(sens_lbl)
+        self._sc_sens_lbl = QLabel("감도")
+        left_lay.addWidget(self._sc_sens_lbl)
 
-        # 초기 게임(Apex Legends) 기본값으로 설정
         _init_name, _init_def, _init_lo, _init_hi, _init_step = GAME_PRESETS[0]
         self._sc_sens_spin = QDoubleSpinBox()
         self._sc_sens_spin.setRange(_init_lo, _init_hi)
         self._sc_sens_spin.setSingleStep(_init_step)
         self._sc_sens_spin.setValue(_init_def)
         self._sc_sens_spin.setDecimals(3 if _init_step < 0.01 else 2 if _init_step < 1 else 0)
-        self._sc_sens_spin.setStyleSheet(_SPINBOX_STYLE.format(size=20))
         self._sc_sens_spin.valueChanged.connect(self._recalc)
         left_lay.addWidget(self._sc_sens_spin)
 
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color:#d0ccc6;")
-        left_lay.addWidget(sep2)
+        self._sc_sep2 = QFrame(); self._sc_sep2.setFrameShape(QFrame.Shape.HLine)
+        left_lay.addWidget(self._sc_sep2)
 
         # DPI 입력
-        dpi_lbl = QLabel("DPI")
-        dpi_lbl.setStyleSheet("font-size:10px; color:#888;")
-        left_lay.addWidget(dpi_lbl)
+        self._sc_dpi_lbl = QLabel("DPI")
+        left_lay.addWidget(self._sc_dpi_lbl)
 
         self._sc_dpi_spin = QDoubleSpinBox()
         self._sc_dpi_spin.setRange(100, 32000)
         self._sc_dpi_spin.setSingleStep(100)
         self._sc_dpi_spin.setValue(800)
         self._sc_dpi_spin.setDecimals(0)
-        self._sc_dpi_spin.setStyleSheet(_SPINBOX_STYLE.format(size=20))
         self._sc_dpi_spin.valueChanged.connect(self._recalc)
         left_lay.addWidget(self._sc_dpi_spin)
 
+        # ── cm/360° 표시 ──────────────────────
+        self._sc_sep3 = QFrame(); self._sc_sep3.setFrameShape(QFrame.Shape.HLine)
+        left_lay.addWidget(self._sc_sep3)
+
+        self._sc_cm360_caption = QLabel("cm / 360°")
+        left_lay.addWidget(self._sc_cm360_caption)
+
+        self._cm360_lbl = QLabel("—")
+        self._cm360_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        left_lay.addWidget(self._cm360_lbl)
+
         left_lay.addStretch()
-        root.addWidget(left_panel)
+        root.addWidget(self._sc_left_panel)
 
         # ── 우측: 결과 패널 ──────────────────────
-        right_panel = QFrame()
-        right_panel.setStyleSheet("background:#e8e4de; border-radius:8px;")
-        right_lay = QVBoxLayout(right_panel)
+        self._sc_right_panel = QFrame()
+        right_lay = QVBoxLayout(self._sc_right_panel)
         right_lay.setContentsMargins(24, 20, 24, 20)
         right_lay.setSpacing(12)
 
-        self._cm360_lbl = QLabel()  # 숨김용 더미
-
         # 다른 게임 등가 감도 표
-        equiv_lbl = QLabel("다른 게임 감도")
-        equiv_lbl.setStyleSheet("font-size:14px; color:#888; letter-spacing:1px;")
-        right_lay.addWidget(equiv_lbl)
+        self._sc_equiv_lbl = QLabel("다른 게임 감도")
+        right_lay.addWidget(self._sc_equiv_lbl)
 
         self._equiv_table = QTableWidget(len(GAME_PRESETS), 2)
-        self._equiv_table.setHorizontalHeaderLabels(["다른 게임 감도", "감도"])
+        self._equiv_table.setHorizontalHeaderLabels(["게임", "감도"])
         self._equiv_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._equiv_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self._equiv_table.horizontalHeader().resizeSection(1, 130)
@@ -980,16 +998,6 @@ class SensCalcWidget(QWidget):
         self._equiv_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._equiv_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self._equiv_table.setShowGrid(False)
-        self._equiv_table.setStyleSheet("""
-            QTableWidget {
-                background:transparent; border:none; font-size:16px; color:#333;
-            }
-            QHeaderView::section {
-                background:#dedad4; color:#555; font-size:13px;
-                border:none; padding:6px;
-            }
-            QTableWidget::item { padding:6px 10px; }
-        """)
         bold_font = QFont(); bold_font.setBold(True); bold_font.setPointSize(12)
         for r, (name, *_) in enumerate(GAME_PRESETS):
             item_name = QTableWidgetItem(name)
@@ -1002,10 +1010,9 @@ class SensCalcWidget(QWidget):
         right_lay.addWidget(self._equiv_table, stretch=1)
 
         # 적용 버튼 — 현재 선택 행의 게임+감도를 메인 스핀박스에 반영
-        apply_hint = QLabel("표에서 행을 클릭하면 해당 게임 감도를 메인에 적용합니다.")
-        apply_hint.setStyleSheet("font-size:10px; color:#999;")
-        apply_hint.setWordWrap(True)
-        right_lay.addWidget(apply_hint)
+        self._sc_apply_hint = QLabel("표에서 행을 클릭하면 해당 게임 감도를 메인에 적용합니다.")
+        self._sc_apply_hint.setWordWrap(True)
+        right_lay.addWidget(self._sc_apply_hint)
 
         self._apply_btn = QPushButton("▶  선택한 게임 감도를 메인에 적용")
         self._apply_btn.setFixedHeight(40)
@@ -1021,24 +1028,54 @@ class SensCalcWidget(QWidget):
         self._apply_btn.clicked.connect(self._do_apply)
         right_lay.addWidget(self._apply_btn)
 
-        root.addWidget(right_panel, stretch=1)
+        root.addWidget(self._sc_right_panel, stretch=1)
 
-        # 초기 계산
+        # 초기 테마 스타일 + 계산
+        self.apply_theme()
         self._recalc()
 
         # 테이블 행 클릭 시 해당 게임 행 하이라이트
         self._equiv_table.cellClicked.connect(self._on_table_row_clicked)
         self._selected_row = 0  # 기본 선택: 첫 번째 행
 
+    def apply_theme(self):
+        # 현재 _cur_theme에 맞게 모든 서브위젯 스타일을 재적용
+        p = _p()
+        self.setStyleSheet(f"background:{p['bg']};")
+        self._sc_left_panel.setStyleSheet(f"background:{p['bg2']}; border-radius:8px;")
+        self._sc_right_panel.setStyleSheet(f"background:{p['bg2']}; border-radius:8px;")
+        self._sc_title_lbl.setStyleSheet(
+            f"font-size:12px; color:{p['txt4']}; letter-spacing:2px;")
+        for lbl in (self._sc_game_lbl, self._sc_sens_lbl,
+                    self._sc_dpi_lbl, self._sc_cm360_caption):
+            lbl.setStyleSheet(f"font-size:10px; color:{p['txt4']};")
+        for sep in (self._sc_sep1, self._sc_sep2, self._sc_sep3):
+            sep.setStyleSheet(f"color:{p['border']};")
+        self._cm360_lbl.setStyleSheet(
+            f"font-size:28px; font-weight:bold; color:{p['txt']};")
+        self._sc_game_combo.setStyleSheet(_combo_style(15))
+        self._sc_sens_spin.setStyleSheet(_spinbox_style(20))
+        self._sc_dpi_spin.setStyleSheet(_spinbox_style(20))
+        self._sc_equiv_lbl.setStyleSheet(
+            f"font-size:14px; color:{p['txt4']}; letter-spacing:1px;")
+        self._sc_apply_hint.setStyleSheet(f"font-size:10px; color:{p['txt5']};")
+        self._equiv_table.setStyleSheet(
+            f"QTableWidget {{ background:transparent; border:none;"
+            f" font-size:16px; color:{p['txt']}; }}"
+            f"QHeaderView::section {{ background:{p['bg3']}; color:{p['txt2']};"
+            f" font-size:13px; border:none; padding:6px; }}"
+            f"QTableWidget::item {{ padding:6px 10px; }}"
+        )
+
     def sync_dpi(self, dpi: float):
-        """메인 DPI 스핀박스 값을 계산기에 동기화 (감도 계산기 탭 진입 시 호출)"""
+        # 메인 DPI 스핀박스 값을 계산기에 동기화 (탭 진입 시 호출)
         self._sc_dpi_spin.blockSignals(True)
         self._sc_dpi_spin.setValue(dpi)
         self._sc_dpi_spin.blockSignals(False)
         self._recalc()
 
     def _on_sc_game_changed(self, idx: int):
-        """게임 변경 시 해당 게임의 기본 감도를 자동 입력"""
+        # 게임 변경 시 해당 게임의 기본 감도를 자동 입력
         _, default, lo, hi, step = GAME_PRESETS[idx]
         self._sc_sens_spin.blockSignals(True)
         self._sc_sens_spin.setRange(lo, hi)
@@ -1061,7 +1098,7 @@ class SensCalcWidget(QWidget):
         else:
             cm360 = 0
 
-        self._cm360_lbl.setText(f"{cm360:.2f}")
+        self._cm360_lbl.setText(f"{cm360:.2f} cm" if cm360 > 0 else "—")
 
         # 등가 감도 표 갱신
         for r, (g_name, *_) in enumerate(GAME_PRESETS):
@@ -1105,7 +1142,7 @@ class SensCalcWidget(QWidget):
 #  오차 그래프 위젯
 # ────────────────────────────────────────────
 class ErrorGraphWidget(QWidget):
-    """최근 5회 세션의 평균 오차를 꺾은선 그래프로 표시"""
+    # 최근 5회 세션의 명중률을 꺾은선 그래프로 표시
 
     _VERDICT_COLOR = {"빠름": "#ff4444", "느림": "#4488ff", "적정": "#44cc77"}
 
@@ -1126,18 +1163,25 @@ class ErrorGraphWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         W, H = self.width(), self.height()
-        painter.fillRect(self.rect(), QColor("#e8e4de"))
+
+        # 테마별 색상
+        dark       = (_cur_theme == "dark")
+        bg_color   = QColor("#1e1e1e") if dark else QColor("#e8e4de")
+        txt_color  = QColor("#e0e0e0") if dark else QColor("#333333")
+        grid_color = QColor("#3a3a3a") if dark else QColor("#ccc8c2")
+
+        painter.fillRect(self.rect(), bg_color)
 
         # 제목
         title_font = QFont("Arial", 8)
         painter.setFont(title_font)
-        painter.setPen(QColor("#333333"))
+        painter.setPen(txt_color)
         painter.drawText(8, 0, W - 16, 18,
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          "명중률")
 
         if not self._data:
-            painter.setPen(QColor("#aaaaaa"))
+            painter.setPen(QColor("#666666") if dark else QColor("#aaaaaa"))
             painter.drawText(0, 18, W, H - 18,
                              Qt.AlignmentFlag.AlignCenter, "기록 없음")
             return
@@ -1155,13 +1199,13 @@ class ErrorGraphWidget(QWidget):
         # 격자선 (수평 3줄)
         for i in range(4):
             gy = plot_y0 + plot_h * i / 3
-            painter.setPen(QPen(QColor("#ccc8c2"), 1))
+            painter.setPen(QPen(grid_color, 1))
             painter.drawLine(int(plot_x0), int(gy), int(plot_x0 + plot_w), int(gy))
 
         # Y 축 레이블
         small_font = QFont("Arial", 7)
         painter.setFont(small_font)
-        painter.setPen(QColor("#333333"))
+        painter.setPen(txt_color)
         painter.drawText(0, plot_y0 - 6, PAD_L - 4, 12,
                          Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                          "100%")
@@ -1194,7 +1238,7 @@ class ErrorGraphWidget(QWidget):
             painter.drawEllipse(x - 4, y - 4, 8, 8)
 
             # 값
-            painter.setPen(QColor("#111111"))
+            painter.setPen(txt_color)
             painter.setFont(small_font)
             label = f"{values[i]:.0f}%"
             lx = x - 14 if i == n - 1 else x - 10
@@ -1203,7 +1247,7 @@ class ErrorGraphWidget(QWidget):
 
         # X 축 레이블 (1회~5회)
         painter.setFont(small_font)
-        painter.setPen(QColor("#333333"))
+        painter.setPen(txt_color)
         offset = 5 - n  # 5회 미만이면 번호를 맞춤
         for i, (x, _) in enumerate(pts):
             painter.drawText(x - 10, H - PAD_B + 4, 20, 14,
@@ -1215,7 +1259,7 @@ class ErrorGraphWidget(QWidget):
 #  설정 다이얼로그 (게임 경로 관리)
 # ────────────────────────────────────────────
 class GamePathSettingsDialog(QDialog):
-    """모든 게임의 설정 파일 경로를 한 곳에서 관리하는 다이얼로그"""
+    # 모든 게임의 설정 파일 경로를 한 곳에서 관리하는 다이얼로그
 
     _BTN_STYLE = """
         QPushButton {{ background:{bg}; color:{fg};
@@ -1382,11 +1426,8 @@ class GamePathSettingsDialog(QDialog):
 
     # ── 경로 헬퍼 ────────────────────────────
     def _auto_path(self, cfg) -> tuple[str | None, str | None]:
-        """
-        자동 탐색 실행 → (존재하는 경로 or None, 시도한/힌트 경로 or None).
-        파일이 없을 때도 '어디를 찾았는지' 알 수 있도록 tried_path를 반환.
-        path_fn이 None을 반환하면 cfg["path_hint"]를 tried_path로 사용.
-        """
+        # 자동 탐색 → (존재하는 경로 or None, 시도한 경로 or None)
+        # path_fn이 None 반환 시 cfg["path_hint"]를 tried_path로 사용
         if cfg is None:
             return None, None
         try:
@@ -1405,13 +1446,6 @@ class GamePathSettingsDialog(QDialog):
         except Exception:
             pass
         return None, None
-
-    def _resolved_path(self, game_name: str, cfg) -> str | None:
-        """커스텀 경로 우선, 없으면 자동 탐색 (존재하는 경로만 반환)"""
-        if game_name in self._custom_paths:
-            return self._custom_paths[game_name]
-        found, _ = self._auto_path(cfg)
-        return found
 
     def _refresh_row(self, game_name: str, cfg):
         ui = self._row_ui.get(game_name)
@@ -1468,7 +1502,7 @@ class GamePathSettingsDialog(QDialog):
 
     # ── 액션 ─────────────────────────────────
     def _auto_detect(self, game_name: str, cfg):
-        """🔍: 커스텀 경로를 지우고 자동 탐색 재실행"""
+        # 커스텀 경로를 지우고 자동 탐색 재실행
         self._custom_paths.pop(game_name, None)
         # "탐색 중…" 표시
         ui = self._row_ui.get(game_name)
@@ -1481,7 +1515,7 @@ class GamePathSettingsDialog(QDialog):
         self._refresh_row(game_name, cfg)
 
     def _pick_file(self, game_name: str, cfg):
-        """📂: 파일 탐색기로 직접 지정"""
+        # 파일 탐색기로 직접 지정
         found, tried = self._auto_path(cfg)
         current = self._custom_paths.get(game_name) or found or tried
         start   = os.path.dirname(current) if current else os.path.expanduser("~")
@@ -1494,12 +1528,12 @@ class GamePathSettingsDialog(QDialog):
             self._refresh_row(game_name, cfg)
 
     def _clear_path(self, game_name: str, cfg):
-        """↺: 직접 지정 경로 초기화 → 자동 탐색으로 복귀"""
+        # 직접 지정 경로 초기화 → 자동 탐색으로 복귀
         self._custom_paths.pop(game_name, None)
         self._refresh_row(game_name, cfg)
 
     def _detect_all(self):
-        """🔍 전체: 모든 게임 커스텀 경로 초기화 후 자동 탐색 재실행"""
+        # 모든 게임 커스텀 경로 초기화 후 자동 탐색 재실행
         # 1단계: 모든 커스텀 경로 초기화 + 전체 행에 "탐색 중…" 표시
         for game_name, cfg in GAME_CONFIG.items():
             self._custom_paths.pop(game_name, None)
@@ -1570,28 +1604,23 @@ class MainWindow(QMainWindow):
         self._body_stack = QStackedWidget()
 
         # 페이지 0,1: 트래킹 (공유 레이아웃)
-        tracking_page = QWidget()
-        tracking_page.setStyleSheet("background:#f0ede8;")
-        tp_lay = QHBoxLayout(tracking_page)
+        self._tracking_page = QWidget()
+        tp_lay = QHBoxLayout(self._tracking_page)
         tp_lay.setContentsMargins(12, 8, 12, 8)
         tp_lay.setSpacing(10)
         tp_lay.addWidget(self._make_canvas_area(), stretch=3)
         tp_lay.addWidget(self._make_right_panel(), stretch=1)
-        self._body_stack.addWidget(tracking_page)   # index 0 (트래킹1)
+        self._body_stack.addWidget(self._tracking_page)   # index 0
 
-        # 페이지 1: 트래킹2 (같은 위젯 재사용 — 별도 페이지 없이 mode만 변경)
-        # 실제로는 index 0 페이지에서 canvas.tracking_mode를 변경
-
-        # 페이지 1: 그리드샷
-        gridshot_page = QWidget()
-        gridshot_page.setStyleSheet("background:#f0ede8;")
-        gs_lay = QHBoxLayout(gridshot_page)
+        # index 1: 그리드샷
+        self._gs_page = QWidget()
+        gs_lay = QHBoxLayout(self._gs_page)
         gs_lay.setContentsMargins(12, 8, 12, 8)
         gs_lay.setSpacing(10)
 
         # 그리드샷 캔버스 + 일시정지 오버레이를 QStackedLayout으로 묶음
-        gs_canvas_frame = QFrame()
-        gs_canvas_frame.setStyleSheet("background:#dedad4; border-radius:6px;")
+        self._gs_canvas_frame = QFrame()
+        gs_canvas_frame = self._gs_canvas_frame
         gs_stack = QStackedLayout(gs_canvas_frame)
         gs_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
         gs_stack.setContentsMargins(0, 0, 0, 0)
@@ -1651,9 +1680,9 @@ class MainWindow(QMainWindow):
 
         gs_stack.addWidget(self._gs_pause_overlay)
 
-        gs_lay.addWidget(gs_canvas_frame, stretch=3)
+        gs_lay.addWidget(self._gs_canvas_frame, stretch=3)
         gs_lay.addWidget(self._make_gs_right_panel(), stretch=1)
-        self._body_stack.addWidget(gridshot_page)   # index 1
+        self._body_stack.addWidget(self._gs_page)   # index 1
 
         # 페이지 2: 감도 계산기
         self._sens_calc = SensCalcWidget()
@@ -1669,17 +1698,126 @@ class MainWindow(QMainWindow):
         self.canvas.tracking_mode = 2   # "트래킹 1" 버튼 선택 상태와 일치 (X축 왕복)
         # 이전 세션 기록 복원
         self._load_history()
+        # 초기 테마 스타일 일괄 적용
+        self._apply_theme()
+
+    # ── 테마 전환 ──────────────────────────────
+    def _toggle_theme(self):
+        global _cur_theme
+        _cur_theme = "dark" if _cur_theme == "light" else "light"
+        self._apply_theme()
+
+    def _apply_theme(self):
+        # 현재 _cur_theme 팔레트를 모든 위젯에 일괄 적용
+        p = _p()
+        dark = (_cur_theme == "dark")
+
+        # ── 메인 윈도우 배경 ──
+        self.centralWidget().setStyleSheet(f"background:{p['bg']};")
+
+        # ── 탑바 ──
+        self._topbar.setStyleSheet(
+            f"background:{p['bg2']}; border-bottom:1px solid {p['border']};")
+        self._title_lbl.setStyleSheet(
+            f"font-size:15px; font-weight:bold; color:{p['txt']};")
+
+        # 모드 버튼
+        sel_bg  = p["txt"]    if dark else "#333333"
+        sel_fg  = p["bg"]     if dark else "#ffffff"
+        hov_bg  = p["bg3"]
+        for btn in self._mode_btns.values():
+            btn.setStyleSheet(
+                f"QPushButton {{ background:transparent; color:{p['txt3']};"
+                f" border:1px solid transparent; border-radius:4px;"
+                f" font-size:12px; padding:0 12px; }}"
+                f"QPushButton:checked {{ background:{sel_bg}; color:{sel_fg};"
+                f" border-color:{sel_bg}; }}"
+                f"QPushButton:hover:!checked {{ background:{hov_bg};"
+                f" border-color:{p['border']}; }}"
+            )
+
+        # 아이콘 버튼들 (설정, 테마)
+        icon_style = (
+            f"QPushButton {{ background:transparent; color:{p['txt4']};"
+            f" border:1px solid transparent; border-radius:4px; font-size:15px; }}"
+            f"QPushButton:hover {{ background:{p['bg3']}; color:{p['txt']};"
+            f" border-color:{p['border']}; }}"
+        )
+        self._settings_btn.setStyleSheet(icon_style)
+        self._theme_btn.setStyleSheet(icon_style)
+        self._theme_btn.setText("☼" if dark else "☽")
+
+        # ── info bar ──
+        self._info_bar.setStyleSheet(
+            f"background:{p['bg4']}; border-bottom:1px solid {p['border']};")
+        for lbl in (self._ib_lbl0, self._sens_label, self._ib_lbl2):
+            lbl.setStyleSheet(f"font-size:10px; color:{p['txt4']};")
+        for sep in (self._ib_sep0, self._ib_sep1):
+            sep.setStyleSheet(f"color:{p['sep']};")
+        self._game_combo.setStyleSheet(_combo_style(16))
+        self._spinbox.setStyleSheet(_spinbox_style(16))
+        self._dpi_spinbox.setStyleSheet(_spinbox_style(16))
+
+        # ── 트래킹 / 그리드샷 페이지 배경 ──
+        self._tracking_page.setStyleSheet(f"background:{p['bg']};")
+        self._gs_page.setStyleSheet(f"background:{p['bg']};")
+        self._canvas_frame.setStyleSheet(
+            f"background:{p['bg3']}; border-radius:6px;")
+        self._gs_canvas_frame.setStyleSheet(
+            f"background:{p['bg3']}; border-radius:6px;")
+
+        # ── 우측 패널들 ──
+        for panel in (self._right_panel, self._gs_right_panel):
+            panel.setStyleSheet(f"background:{p['bg2']}; border-radius:6px;")
+            # 패널 내부 QLabel 들
+            for lbl in panel.findChildren(QLabel):
+                st = lbl.styleSheet()
+                # 큰 숫자 레이블 (font-size:36px)
+                if "36px" in st:
+                    lbl.setStyleSheet(
+                        f"font-size:36px; font-weight:bold; color:{p['txt']};")
+                # 섹션 헤더 (font-size:11px color:#888)
+                elif "11px" in st and "color" in st:
+                    lbl.setStyleSheet(f"font-size:11px; color:{p['txt4']};")
+                # 설명 소문자 (font-size:10px)
+                elif "10px" in st:
+                    lbl.setStyleSheet(f"font-size:10px; color:{p['txt5']};")
+                # 지표 키 레이블
+                elif "font-size:11px" in st and "bold" not in st:
+                    lbl.setStyleSheet(f"font-size:11px; color:{p['txt3']};")
+                # 지표 값 레이블
+                elif "bold" in st and "11px" in st:
+                    lbl.setStyleSheet(
+                        f"font-size:11px; font-weight:bold; color:{p['txt']};")
+            # 구분선
+            for sep in panel.findChildren(QFrame):
+                if sep.frameShape() == QFrame.Shape.HLine:
+                    sep.setStyleSheet(f"color:{p['border']};")
+
+        # ── 바텀바 ──
+        self._bottom_bar.setStyleSheet(
+            f"background:{p['bg2']}; border-top:1px solid {p['border']};")
+        self._bb_hint_lbl.setStyleSheet(f"font-size:11px; color:{p['txt4']};")
+
+        # ── 캔버스 배경색 ──
+        TrackingCanvas._COL_BG  = QColor(p["canvas"])
+        GridshotCanvas._COL_BG  = QColor(p["canvas"])
+        self.canvas.update()
+        self._gs_canvas.update()
+        self._err_graph.update()   # 명중률 그래프 재렌더
+
+        # ── 감도 계산기 ──
+        self._sens_calc.apply_theme()
 
     def _make_topbar(self):
-        bar = QFrame()
-        bar.setFixedHeight(44)
-        bar.setStyleSheet("background:#e8e4de; border-bottom:1px solid #d0ccc6;")
-        lay = QHBoxLayout(bar)
+        self._topbar = QFrame()
+        self._topbar.setFixedHeight(44)
+        lay = QHBoxLayout(self._topbar)
         lay.setContentsMargins(16, 0, 16, 0)
 
-        title = QLabel("에임 트레이너")
-        title.setStyleSheet("font-size:15px; font-weight:bold; color:#222;")
-        lay.addWidget(title)
+        self._title_lbl = QLabel("에임 트레이너")
+        self._title_lbl.setStyleSheet("font-size:15px; font-weight:bold;")
+        lay.addWidget(self._title_lbl)
         lay.addStretch()
 
         self._mode_btns = {}
@@ -1696,25 +1834,6 @@ class MainWindow(QMainWindow):
             btn.setCheckable(True)
             btn.setChecked(i == 0)
             btn.clicked.connect(lambda checked, n=name: self._on_mode_changed(n))
-            btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent;
-                    color: #666;
-                    border: 1px solid transparent;
-                    border-radius: 4px;
-                    font-size: 12px;
-                    padding: 0 12px;
-                }
-                QPushButton:checked {
-                    background: #333;
-                    color: #fff;
-                    border-color: #333;
-                }
-                QPushButton:hover:!checked {
-                    background: #dedad4;
-                    border-color: #ccc;
-                }
-            """)
             mode_lay.addWidget(btn)
             self._mode_btns[name] = btn
 
@@ -1722,22 +1841,24 @@ class MainWindow(QMainWindow):
         lay.addSpacing(8)
 
         # ⚙ 설정 버튼 (게임 경로 관리)
-        settings_btn = QPushButton("⚙")
-        settings_btn.setFixedSize(28, 28)
-        settings_btn.setToolTip("게임 설정 파일 경로 관리")
-        settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        settings_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; color: #888;
-                border: 1px solid transparent; border-radius: 4px;
-                font-size: 15px;
-            }
-            QPushButton:hover { background: #dedad4; color: #333; border-color: #ccc; }
-        """)
-        settings_btn.clicked.connect(self._open_path_settings)
-        lay.addWidget(settings_btn)
+        self._settings_btn = QPushButton("⚙")
+        self._settings_btn.setFixedSize(28, 28)
+        self._settings_btn.setToolTip("게임 설정 파일 경로 관리")
+        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._settings_btn.clicked.connect(self._open_path_settings)
+        lay.addWidget(self._settings_btn)
         lay.addSpacing(4)
-        return bar
+
+        # ☽/☼ 테마 토글 버튼 (텍스트 렌더링 심볼)
+        self._theme_btn = QPushButton("☽")
+        self._theme_btn.setFixedSize(28, 28)
+        self._theme_btn.setToolTip("다크/라이트 테마 전환")
+        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._theme_btn.clicked.connect(self._toggle_theme)
+        lay.addWidget(self._theme_btn)
+
+        # 초기 스타일은 _apply_theme 에서 일괄 적용
+        return self._topbar
 
     def _on_mode_changed(self, selected: str):
         # 버튼 상태 동기화
@@ -1767,7 +1888,7 @@ class MainWindow(QMainWindow):
             self._sens_calc.sync_dpi(self._dpi_spinbox.value())
 
     def _stop_all_sessions(self):
-        """모든 세션 중지"""
+        # 모든 세션 중지
         if self._running or self._paused:
             self._stop_session(show_result=False)
         if self._gs_running or self._gs_paused:
@@ -1779,7 +1900,6 @@ class MainWindow(QMainWindow):
     def _make_info_bar(self):
         self._info_bar = QFrame()
         self._info_bar.setFixedHeight(80)
-        self._info_bar.setStyleSheet("background:#eae6e0; border-bottom:1px solid #d0ccc6;")
         lay = QHBoxLayout(self._info_bar)
         lay.setContentsMargins(16, 0, 16, 0)
         lay.setSpacing(0)
@@ -1789,38 +1909,22 @@ class MainWindow(QMainWindow):
         col0.setContentsMargins(24, 6, 24, 6)
         col0.setSpacing(2)
 
-        lbl0 = QLabel("게임 선택")
-        lbl0.setStyleSheet("font-size:10px; color:#888;")
+        self._ib_lbl0 = QLabel("게임 선택")
 
         self._game_combo = QComboBox()
         for name, *_ in GAME_PRESETS:
             self._game_combo.addItem(name)
         self._game_combo.setFixedWidth(180)
-        self._game_combo.setStyleSheet("""
-            QComboBox {
-                font-size: 16px; font-weight: bold; color: #333;
-                background: transparent; border: none;
-                border-bottom: 2px solid #bbb; padding-bottom: 2px;
-            }
-            QComboBox:focus { border-bottom-color: #555; }
-            QComboBox::drop-down { border: none; width: 20px; }
-            QComboBox QAbstractItemView {
-                background: #f0ede8; border: 1px solid #ccc;
-                color: #222; selection-background-color: #dedad4;
-                selection-color: #111; font-size: 16px;
-            }
-        """)
         self._game_combo.currentIndexChanged.connect(self._on_game_changed)
 
-        col0.addWidget(lbl0)
+        col0.addWidget(self._ib_lbl0)
         col0.addWidget(self._game_combo)
         lay.addLayout(col0)
 
-        sep0 = QFrame()
-        sep0.setFrameShape(QFrame.Shape.VLine)
-        sep0.setFixedHeight(62)
-        sep0.setStyleSheet("color:#c0bcb6;")
-        lay.addWidget(sep0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self._ib_sep0 = QFrame()
+        self._ib_sep0.setFrameShape(QFrame.Shape.VLine)
+        self._ib_sep0.setFixedHeight(62)
+        lay.addWidget(self._ib_sep0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         # 감도 스핀박스
         col1 = QVBoxLayout()
@@ -1828,7 +1932,6 @@ class MainWindow(QMainWindow):
         col1.setSpacing(2)
 
         self._sens_label = QLabel("감도")
-        self._sens_label.setStyleSheet("font-size:10px; color:#888;")
 
         self._spinbox = QDoubleSpinBox()
         self._spinbox.setRange(0.10, 10.00)
@@ -1836,27 +1939,22 @@ class MainWindow(QMainWindow):
         self._spinbox.setValue(2.50)
         self._spinbox.setDecimals(2)
         self._spinbox.setFixedWidth(120)
-        self._spinbox.setStyleSheet(_SPINBOX_STYLE.format(size=16))
         self._spinbox.valueChanged.connect(self._on_sensitivity_changed)
 
         col1.addWidget(self._sens_label)
         col1.addWidget(self._spinbox)
         lay.addLayout(col1)
 
-        self._edpi_lbl = None
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setFixedHeight(40)
-        sep.setStyleSheet("color:#c0bcb6;")
-        lay.addWidget(sep, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self._ib_sep1 = QFrame()
+        self._ib_sep1.setFrameShape(QFrame.Shape.VLine)
+        self._ib_sep1.setFixedHeight(40)
+        lay.addWidget(self._ib_sep1, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         col2 = QVBoxLayout()
         col2.setContentsMargins(24, 6, 24, 6)
         col2.setSpacing(2)
 
-        lbl2 = QLabel("DPI")
-        lbl2.setStyleSheet("font-size:10px; color:#888;")
+        self._ib_lbl2 = QLabel("DPI")
 
         self._dpi_spinbox = QDoubleSpinBox()
         self._dpi_spinbox.setRange(100, 32000)
@@ -1864,10 +1962,9 @@ class MainWindow(QMainWindow):
         self._dpi_spinbox.setValue(800)
         self._dpi_spinbox.setDecimals(0)
         self._dpi_spinbox.setFixedWidth(120)
-        self._dpi_spinbox.setStyleSheet(_SPINBOX_STYLE.format(size=16))
         self._dpi_spinbox.valueChanged.connect(self._on_dpi_changed)
 
-        col2.addWidget(lbl2)
+        col2.addWidget(self._ib_lbl2)
         col2.addWidget(self._dpi_spinbox)
         lay.addLayout(col2)
 
@@ -1876,7 +1973,7 @@ class MainWindow(QMainWindow):
 
     # ── 게임 설정 파일 적용 ──────────────────────────
     def _apply_sens_to_config(self, sens: float) -> tuple[bool, str]:
-        """현재 선택된 게임의 설정 파일에 감도를 직접 기록. (success, message)"""
+        # 현재 선택된 게임의 설정 파일에 감도를 직접 기록, (success, message) 반환
         game_name = GAME_PRESETS[self._game_combo.currentIndex()][0]
         cfg = GAME_CONFIG.get(game_name)
 
@@ -1929,15 +2026,12 @@ class MainWindow(QMainWindow):
         pattern_list = cfg.get("patterns")
         if pattern_list:
             new_content, count = content, 0
-            matched_pat = None
             for pat, rep in pattern_list:
                 new_content, count = do_replace(content, pat, rep)
                 if count > 0:
-                    matched_pat = pat
                     break
         else:
             new_content, count = do_replace(content, cfg["pattern"], cfg["repl"])
-            matched_pat = cfg.get("pattern")
 
         if count == 0:
             append_tmpl = cfg.get("append_tmpl")
@@ -1987,7 +2081,7 @@ class MainWindow(QMainWindow):
         return True, f"감도 {val_str} 적용 완료\n({os.path.basename(path)})"
 
     def _restore_config(self) -> tuple[bool, str]:
-        """현재 게임의 설정 파일을 적용 전 원본으로 복구"""
+        # 현재 게임의 설정 파일을 적용 전 원본으로 복구
         game_name = GAME_PRESETS[self._game_combo.currentIndex()][0]
 
         if game_name not in self._config_backups:
@@ -2033,7 +2127,7 @@ class MainWindow(QMainWindow):
 
     def _make_canvas_area(self):
         frame = QFrame()
-        frame.setStyleSheet("background:#dedad4; border-radius:6px;")
+        self._canvas_frame = frame
 
         stack = QStackedLayout(frame)
         stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
@@ -2048,7 +2142,6 @@ class MainWindow(QMainWindow):
         self._overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         ov_lay = QVBoxLayout(self._overlay)
         ov_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._center_btn = None
         stack.addWidget(self._overlay)
 
         # 일시정지 오버레이
@@ -2103,7 +2196,7 @@ class MainWindow(QMainWindow):
     def _make_right_panel(self):
         panel = QFrame()
         panel.setFixedWidth(260)
-        panel.setStyleSheet("background:#e8e4de; border-radius:6px;")
+        self._right_panel = panel
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(12)
@@ -2116,7 +2209,7 @@ class MainWindow(QMainWindow):
         self.error_lbl.setStyleSheet("font-size:36px; font-weight:bold; color:#333;")
         lay.addWidget(self.error_lbl)
 
-        desc = QLabel("추적 세션 동안 실시간으로 픽셀 오차가 기록됩니다.")
+        desc = QLabel("추적 세션 동안 실시간으로 명중률이 기록됩니다.")
         desc.setStyleSheet("font-size:10px; color:#999;")
         desc.setWordWrap(True)
         lay.addWidget(desc)
@@ -2128,7 +2221,7 @@ class MainWindow(QMainWindow):
 
         self._metrics = {}
         for key, default in [
-            ("명중률",    "—"),
+            ("픽셀 오차", "—"),
             ("평균 오차", "—"),
             ("감도 판정", "—"),
             ("남은 시간", f"{SESSION_SECONDS}s"),
@@ -2169,10 +2262,10 @@ class MainWindow(QMainWindow):
         return panel
 
     def _make_gs_right_panel(self):
-        """그리드샷 전용 우측 패널 — 트래킹과 동일 디자인"""
+        # 그리드샷 전용 우측 패널 — 트래킹과 동일 디자인
         panel = QFrame()
         panel.setFixedWidth(260)
-        panel.setStyleSheet("background:#e8e4de; border-radius:6px;")
+        self._gs_right_panel = panel
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(12)
@@ -2237,32 +2330,17 @@ class MainWindow(QMainWindow):
         return panel
 
     def _make_bottom_bar(self):
-        bar = QFrame()
-        bar.setFixedHeight(52)
-        bar.setStyleSheet("background:#e8e4de; border-top:1px solid #d0ccc6;")
-        lay = QHBoxLayout(bar)
+        self._bottom_bar = QFrame()
+        self._bottom_bar.setFixedHeight(40)
+        lay = QHBoxLayout(self._bottom_bar)
         lay.setContentsMargins(16, 0, 16, 0)
 
-        session_lbl = QLabel("세션 01 / 04")
-        session_lbl.setStyleSheet("font-size:11px; color:#888;")
-        lay.addWidget(session_lbl)
+        self._bb_hint_lbl = QLabel("클릭하여 시작  |  ESC 일시정지")
+        self._bb_hint_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addStretch()
-
-        reset_btn = QPushButton("세션 재설정")
-        reset_btn.setFixedSize(100, 34)
-        reset_btn.setStyleSheet("""
-            QPushButton { background:transparent; color:#555;
-                          border:1px solid #bbb; border-radius:4px; font-size:12px; }
-            QPushButton:hover { background:#ddd; }
-        """)
-        reset_btn.clicked.connect(self._reset)
-        lay.addWidget(reset_btn)
+        lay.addWidget(self._bb_hint_lbl)
         lay.addStretch()
-
-        ts_lbl = QLabel("클릭하여 시작  |  ESC 일시정지  |  30초 측정")
-        ts_lbl.setStyleSheet("font-size:11px; color:#888;")
-        lay.addWidget(ts_lbl)
-        return bar
+        return self._bottom_bar
 
     # ── 키 입력 ──────────────────────────────
     def keyPressEvent(self, event):
@@ -2326,35 +2404,18 @@ class MainWindow(QMainWindow):
             self._save_session(r)
             self._show_combined_result_dialog(r)
 
-    def _reset(self):
-        mode = self._current_mode
-        if mode in ("트래킹 1", "트래킹 2"):
-            self._stop_session(show_result=False)
-            self.error_lbl.setText("—")
-            for k, v in self._metrics.items():
-                v.setText(f"{SESSION_SECONDS}s" if k == "남은 시간" else "—")
-        elif mode == "그리드샷":
-            if self._gs_running or self._gs_paused:
-                self._gs_canvas.stop()
-                self._gs_running = False
-                self._gs_paused  = False
-                self._gs_pause_overlay.hide()
-            for k, v in self._gs_metrics.items():
-                v.setText(f"{SESSION_SECONDS}s" if k == "남은 시간" else "—")
-            self._gs_canvas.update()
-
     def _update_info(self):
-        """50ms마다 패널 정보 갱신"""
+        # 50ms마다 패널 정보 갱신
         mode = self._current_mode
         if mode in ("트래킹 1", "트래킹 2"):
             if not self._running:
                 return
-            err = self.canvas.error_distance()
-            self.error_lbl.setText(f"{err:.1f}")
-
             total   = self.canvas._total_frames or 1
             hit_pct = self.canvas._hit_frames / total * 100
-            self._metrics["명중률"].setText(f"{hit_pct:.1f} %")
+            self.error_lbl.setText(f"{hit_pct:.1f} %")
+
+            err = self.canvas.error_distance()
+            self._metrics["픽셀 오차"].setText(f"{err:.1f} px")
             self._metrics["평균 오차"].setText(
                 f"{self.canvas._errors_sum/len(self.canvas._errors):.1f} px"
                 if self.canvas._errors else "—"
@@ -2407,7 +2468,7 @@ class MainWindow(QMainWindow):
         self._gs_canvas.start_resume()
 
     def _gs_on_result(self, result: dict):
-        """그리드샷 세션 종료 콜백"""
+        # 그리드샷 세션 종료 콜백
         self._gs_running = False
         # 결과 패널 갱신
         self._gs_hit_lbl.setText(str(result["hits"]))
@@ -2664,7 +2725,7 @@ class MainWindow(QMainWindow):
         path_preview.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         def _refresh_path_ui():
-            """경로 라벨·적용 버튼 상태를 현재 _cur_path 기준으로 갱신"""
+            # 경로 라벨·적용 버튼 상태를 현재 _cur_path 기준으로 갱신
             ok = _path_exists()
             if not supported:
                 path_preview.setText(f"⚠  {game_name}은 자동 적용 미지원")
@@ -2694,7 +2755,7 @@ class MainWindow(QMainWindow):
             apply_btn.setStyleSheet(_style)
 
         def _pick_file():
-            """파일 열기 다이얼로그로 설정 파일을 직접 지정"""
+            # 파일 열기 다이얼로그로 설정 파일을 직접 지정
             start_dir = os.path.dirname(_cur_path[0]) if _cur_path[0] else os.path.expanduser("~")
             chosen, _ = QFileDialog.getOpenFileName(
                 dlg,
@@ -2818,7 +2879,7 @@ class MainWindow(QMainWindow):
 
     # ── 세션 기록 저장/불러오기 ──────────────────
     def _save_session(self, r: dict):
-        """세션 결과를 JSON 파일에 누적 저장"""
+        # 세션 결과를 JSON 파일에 누적 저장
         entry = {
             "timestamp":   time.strftime("%Y-%m-%d %H:%M:%S"),
             "game":        GAME_PRESETS[self._game_combo.currentIndex()][0],
@@ -2840,7 +2901,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _load_history_raw(self) -> list:
-        """파일에서 전체 기록 목록 반환 (실패 시 빈 리스트)"""
+        # 파일에서 전체 기록 목록 반환 (실패 시 빈 리스트)
         if not os.path.exists(HISTORY_FILE):
             return []
         try:
@@ -2851,7 +2912,7 @@ class MainWindow(QMainWindow):
             return []
 
     def _load_history(self):
-        """앱 시작 시 최근 5회 세션을 그래프에 복원"""
+        # 앱 시작 시 최근 5회 세션을 그래프에 복원
         history = self._load_history_raw()
         # 트래킹 세션만 필터링
         tracking = [e for e in history if e.get("mode") in ("트래킹 1", "트래킹 2")]
@@ -2859,12 +2920,12 @@ class MainWindow(QMainWindow):
             self._err_graph.push(entry.get("hit_rate", 0), entry.get("verdict", "적정"))
 
     def _open_path_settings(self):
-        """⚙ 버튼 → 게임 경로 관리 다이얼로그 열기"""
+        # ⚙ 버튼 → 게임 경로 관리 다이얼로그 열기
         dlg = GamePathSettingsDialog(self, self._custom_config_paths)
         dlg.exec()
 
     def _apply_from_calc(self, game_name: str, sens: float, dpi: float):
-        """감도 계산기 '적용' 버튼 → 메인 게임 콤보·감도·DPI 스핀박스 동기화"""
+        # 감도 계산기 '적용' 버튼 → 메인 게임 콤보·감도·DPI 스핀박스 동기화
         # 게임 콤보 변경
         for i, (name, *_) in enumerate(GAME_PRESETS):
             if name == game_name:
