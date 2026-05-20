@@ -6,20 +6,33 @@ import os
 import re
 import glob
 import json
+import base64
 try:
     import winreg
     _HAS_WINREG = True
 except ImportError:
     _HAS_WINREG = False
 
+try:
+    import cv2 as _cv2
+    _HAS_CV2 = True
+except ImportError:
+    _HAS_CV2 = False
+
+try:
+    import anthropic as _anthropic_mod
+    _HAS_ANTHROPIC = True
+except ImportError:
+    _HAS_ANTHROPIC = False
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel,
     QPushButton, QHBoxLayout, QVBoxLayout, QFrame,
     QStackedLayout, QDialog, QDoubleSpinBox, QComboBox,
     QStackedWidget, QSizePolicy, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFileDialog,
+    QHeaderView, QFileDialog, QLineEdit, QProgressBar,
 )
-from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, QThread, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont
 
 
@@ -1553,6 +1566,490 @@ class GamePathSettingsDialog(QDialog):
 
 
 # ────────────────────────────────────────────
+#  영상 감도 분석 – 백그라운드 워커
+# ────────────────────────────────────────────
+class VideoAnalysisWorker(QThread):
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(dict)
+    error    = pyqtSignal(str)
+
+    def __init__(self, video_path: str, api_key: str,
+                 game_name: str, current_sens: float, dpi: float):
+        super().__init__()
+        self.video_path   = video_path
+        self.api_key      = api_key
+        self.game_name    = game_name
+        self.current_sens = current_sens
+        self.dpi          = dpi
+
+    def run(self):
+        try:
+            self._analyze()
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+    def _analyze(self):
+        self.progress.emit(5, "영상 로딩 중…")
+
+        cap = _cv2.VideoCapture(self.video_path)
+        if not cap.isOpened():
+            self.error.emit("영상 파일을 열 수 없습니다.")
+            return
+
+        total_frames = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+        fps          = cap.get(_cv2.CAP_PROP_FPS) or 30.0
+        duration     = total_frames / fps
+
+        # 균등 간격으로 12 프레임 추출
+        N       = 12
+        indices = [int(total_frames * i / N) for i in range(N)]
+        frames_b64 = []
+        for idx in indices:
+            cap.set(_cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            h, w = frame.shape[:2]
+            if w > 1280:
+                frame = _cv2.resize(frame, (1280, int(h * 1280 / w)))
+            _, buf = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 75])
+            frames_b64.append(base64.standard_b64encode(buf.tobytes()).decode())
+        cap.release()
+
+        if not frames_b64:
+            self.error.emit("영상에서 프레임을 추출할 수 없습니다.")
+            return
+
+        self.progress.emit(30, f"프레임 {len(frames_b64)}개 추출 완료 ({duration:.1f}초 영상)")
+
+        client = _anthropic_mod.Anthropic(api_key=self.api_key)
+
+        content = [
+            {
+                "type": "text",
+                "text": (
+                    f"당신은 FPS/TPS 게임 마우스 감도 분석 전문가입니다.\n"
+                    f"아래에 '{self.game_name}' 게임플레이 영상에서 균등 간격으로 추출한 "
+                    f"{len(frames_b64)}개의 프레임이 있습니다.\n"
+                    f"현재 설정: 감도 {self.current_sens}, DPI {int(self.dpi)}\n\n"
+                    "각 프레임과 프레임 간 변화를 보고 플레이어의 에임(조준) 패턴을 분석해주세요:\n"
+                    "• 크로스헤어가 적을 지나치고 되돌아오는 오버슈팅이 잦으면 → '빠름'\n"
+                    "• 크로스헤어가 적에 느리게 접근하거나 따라가지 못하면 → '느림'\n"
+                    "• 조준이 자연스럽고 적을 잘 추적하면 → '적정'\n\n"
+                    "적이 없는 구간이 많더라도 크로스헤어의 이동 속도·진폭으로도 판단해주세요.\n\n"
+                    "반드시 아래 JSON 형식만 출력하세요 (다른 텍스트 없이):\n"
+                    '{"verdict":"빠름"|"느림"|"적정",'
+                    '"confidence":0~100,'
+                    '"overshoot_count":오버슈팅_횟수,'
+                    '"undershoot_count":언더슈팅_횟수,'
+                    '"reasoning":"한국어 2~3문장",'
+                    '"suggested_change":퍼센트_정수_(-20~+20)}'
+                )
+            }
+        ]
+        for b64 in frames_b64:
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
+            })
+
+        self.progress.emit(50, "Claude AI 분석 중…")
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": content}]
+        )
+
+        self.progress.emit(90, "결과 처리 중…")
+
+        raw = response.content[0].text.strip()
+        m   = re.search(r'\{.*\}', raw, re.DOTALL)
+        if m:
+            result = json.loads(m.group())
+        else:
+            result = {
+                "verdict": "알 수 없음",
+                "confidence": 0,
+                "overshoot_count": 0,
+                "undershoot_count": 0,
+                "reasoning": raw,
+                "suggested_change": 0,
+            }
+
+        result["frames_analyzed"] = len(frames_b64)
+        result["video_duration"]  = round(duration, 1)
+        self.progress.emit(100, "완료")
+        self.finished.emit(result)
+
+
+# ────────────────────────────────────────────
+#  영상 감도 분석 위젯
+# ────────────────────────────────────────────
+class VideoAnalysisWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.on_apply    = None
+        self._worker     = None
+        self._video_path = ""
+        self._result     = {}
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(20)
+
+        root.addWidget(self._build_left(), stretch=0)
+        root.addWidget(self._build_right(), stretch=1)
+
+    # ── 좌측 설정 패널 ───────────────────────
+    def _build_left(self):
+        self._va_left = QFrame()
+        self._va_left.setFixedWidth(290)
+        lay = QVBoxLayout(self._va_left)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(10)
+
+        self._va_title = QLabel("영상 감도 분석")
+        self._va_title.setStyleSheet("font-size:15px; font-weight:bold;")
+        lay.addWidget(self._va_title)
+
+        _sep0 = QFrame(); _sep0.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(_sep0)
+
+        self._va_api_lbl = QLabel("Anthropic API 키")
+        lay.addWidget(self._va_api_lbl)
+
+        api_row = QHBoxLayout()
+        api_row.setSpacing(4)
+        self._va_api_edit = QLineEdit()
+        self._va_api_edit.setPlaceholderText("sk-ant-...")
+        self._va_api_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        api_row.addWidget(self._va_api_edit)
+
+        self._va_show_btn = QPushButton("표시")
+        self._va_show_btn.setFixedSize(44, 28)
+        self._va_show_btn.setCheckable(True)
+        self._va_show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._va_show_btn.toggled.connect(
+            lambda on: self._va_api_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+        api_row.addWidget(self._va_show_btn)
+        lay.addLayout(api_row)
+
+        _sep1 = QFrame(); _sep1.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(_sep1)
+
+        self._va_file_lbl = QLabel("게임플레이 영상")
+        lay.addWidget(self._va_file_lbl)
+
+        self._va_path_lbl = QLabel("파일을 선택해주세요")
+        self._va_path_lbl.setWordWrap(True)
+        self._va_path_lbl.setStyleSheet("font-size:11px; color:#888;")
+        lay.addWidget(self._va_path_lbl)
+
+        self._va_pick_btn = QPushButton("파일 선택…")
+        self._va_pick_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._va_pick_btn.clicked.connect(self._pick_video)
+        lay.addWidget(self._va_pick_btn)
+
+        _sep2 = QFrame(); _sep2.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(_sep2)
+
+        self._va_game_lbl = QLabel("게임")
+        lay.addWidget(self._va_game_lbl)
+        self._va_game_combo = QComboBox()
+        for name, *_ in GAME_PRESETS:
+            self._va_game_combo.addItem(name)
+        self._va_game_combo.currentIndexChanged.connect(self._sync_sens_range)
+        lay.addWidget(self._va_game_combo)
+
+        self._va_sens_lbl = QLabel("현재 감도")
+        lay.addWidget(self._va_sens_lbl)
+        _, def0, lo0, hi0, step0 = GAME_PRESETS[0]
+        self._va_sens_spin = QDoubleSpinBox()
+        self._va_sens_spin.setRange(lo0, hi0)
+        self._va_sens_spin.setSingleStep(step0)
+        self._va_sens_spin.setValue(def0)
+        lay.addWidget(self._va_sens_spin)
+
+        self._va_dpi_lbl = QLabel("DPI")
+        lay.addWidget(self._va_dpi_lbl)
+        self._va_dpi_spin = QDoubleSpinBox()
+        self._va_dpi_spin.setRange(100, 32000)
+        self._va_dpi_spin.setSingleStep(100)
+        self._va_dpi_spin.setValue(800)
+        self._va_dpi_spin.setDecimals(0)
+        lay.addWidget(self._va_dpi_spin)
+
+        lay.addStretch()
+
+        self._va_progress = QProgressBar()
+        self._va_progress.setRange(0, 100)
+        self._va_progress.setValue(0)
+        self._va_progress.hide()
+        lay.addWidget(self._va_progress)
+
+        self._va_status_lbl = QLabel("")
+        self._va_status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._va_status_lbl.setStyleSheet("font-size:11px; color:#888;")
+        self._va_status_lbl.hide()
+        lay.addWidget(self._va_status_lbl)
+
+        self._va_start_btn = QPushButton("분석 시작")
+        self._va_start_btn.setFixedHeight(44)
+        self._va_start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._va_start_btn.setStyleSheet(
+            "QPushButton { background:#2b7a3a; color:#fff;"
+            " border-radius:6px; font-size:14px; font-weight:bold; }"
+            "QPushButton:hover { background:#37a34a; }"
+            "QPushButton:disabled { background:#555; color:#aaa; }"
+        )
+        self._va_start_btn.clicked.connect(self._start_analysis)
+        lay.addWidget(self._va_start_btn)
+
+        return self._va_left
+
+    # ── 우측 결과 패널 ───────────────────────
+    def _build_right(self):
+        self._va_right = QFrame()
+        lay = QVBoxLayout(self._va_right)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(12)
+
+        self._va_res_title = QLabel("분석 결과")
+        self._va_res_title.setStyleSheet("font-size:14px; font-weight:bold;")
+        lay.addWidget(self._va_res_title)
+
+        _sep3 = QFrame(); _sep3.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(_sep3)
+
+        self._va_verdict_lbl = QLabel("—")
+        self._va_verdict_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._va_verdict_lbl.setStyleSheet(
+            "font-size:48px; font-weight:bold; color:#555;")
+        lay.addWidget(self._va_verdict_lbl)
+
+        self._va_conf_lbl = QLabel("")
+        self._va_conf_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._va_conf_lbl.setStyleSheet("font-size:13px; color:#888;")
+        lay.addWidget(self._va_conf_lbl)
+
+        self._va_info_lbl = QLabel("")
+        self._va_info_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._va_info_lbl.setStyleSheet("font-size:11px; color:#aaa;")
+        lay.addWidget(self._va_info_lbl)
+
+        _sep4 = QFrame(); _sep4.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(_sep4)
+
+        self._va_reason_lbl = QLabel("판단 근거")
+        self._va_reason_lbl.setStyleSheet("font-size:12px; font-weight:bold;")
+        lay.addWidget(self._va_reason_lbl)
+
+        self._va_reason_text = QLabel("영상을 선택하고 분석을 시작하세요.")
+        self._va_reason_text.setWordWrap(True)
+        self._va_reason_text.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._va_reason_text.setStyleSheet(
+            "font-size:13px; color:#555; padding:8px 0;")
+        lay.addWidget(self._va_reason_text, stretch=1)
+
+        _sep5 = QFrame(); _sep5.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(_sep5)
+
+        self._va_sugg_lbl = QLabel("권장 감도")
+        self._va_sugg_lbl.setStyleSheet("font-size:12px; font-weight:bold;")
+        lay.addWidget(self._va_sugg_lbl)
+
+        sugg_row = QHBoxLayout()
+        sugg_row.setSpacing(12)
+
+        self._va_change_lbl = QLabel("—")
+        self._va_change_lbl.setStyleSheet(
+            "font-size:22px; font-weight:bold; color:#888;")
+        sugg_row.addWidget(self._va_change_lbl)
+
+        self._va_arrow_lbl = QLabel("→")
+        sugg_row.addWidget(self._va_arrow_lbl)
+
+        self._va_new_sens_lbl = QLabel("—")
+        self._va_new_sens_lbl.setStyleSheet(
+            "font-size:22px; font-weight:bold; color:#2b7a3a;")
+        sugg_row.addWidget(self._va_new_sens_lbl)
+        sugg_row.addStretch()
+        lay.addLayout(sugg_row)
+
+        self._va_apply_btn = QPushButton("이 감도 적용하기")
+        self._va_apply_btn.setFixedHeight(40)
+        self._va_apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._va_apply_btn.setEnabled(False)
+        self._va_apply_btn.setStyleSheet(
+            "QPushButton { background:#1a5276; color:#fff;"
+            " border-radius:6px; font-size:13px; font-weight:bold; }"
+            "QPushButton:hover { background:#2471a3; }"
+            "QPushButton:disabled { background:#555; color:#888; }"
+        )
+        self._va_apply_btn.clicked.connect(self._apply_suggested)
+        lay.addWidget(self._va_apply_btn)
+
+        return self._va_right
+
+    # ── 슬롯 ────────────────────────────────
+    def _pick_video(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "게임플레이 영상 선택", "",
+            "영상 파일 (*.mp4 *.avi *.mov *.mkv *.wmv *.flv);;모든 파일 (*)"
+        )
+        if path:
+            self._video_path = path
+            self._va_path_lbl.setText(os.path.basename(path))
+            self._va_path_lbl.setStyleSheet("font-size:11px; color:#444;")
+
+    def _sync_sens_range(self, idx: int):
+        _, def_v, lo, hi, step = GAME_PRESETS[idx]
+        self._va_sens_spin.blockSignals(True)
+        self._va_sens_spin.setRange(lo, hi)
+        self._va_sens_spin.setSingleStep(step)
+        self._va_sens_spin.setDecimals(3 if step < 0.01 else 2 if step < 1 else 0)
+        self._va_sens_spin.setValue(def_v)
+        self._va_sens_spin.blockSignals(False)
+
+    def _start_analysis(self):
+        if not _HAS_CV2:
+            self._va_reason_text.setText(
+                "OpenCV가 설치되지 않았습니다.\n"
+                "터미널에서 다음 명령을 실행해주세요:\n\n  pip install opencv-python")
+            return
+        if not _HAS_ANTHROPIC:
+            self._va_reason_text.setText(
+                "anthropic 패키지가 설치되지 않았습니다.\n"
+                "터미널에서 다음 명령을 실행해주세요:\n\n  pip install anthropic")
+            return
+        api_key = self._va_api_edit.text().strip()
+        if not api_key:
+            self._va_reason_text.setText("API 키를 입력해주세요.")
+            return
+        if not self._video_path or not os.path.exists(self._video_path):
+            self._va_reason_text.setText("유효한 영상 파일을 선택해주세요.")
+            return
+
+        game_name    = self._va_game_combo.currentText()
+        current_sens = self._va_sens_spin.value()
+        dpi          = self._va_dpi_spin.value()
+
+        self._va_start_btn.setEnabled(False)
+        self._va_progress.setValue(0)
+        self._va_progress.show()
+        self._va_status_lbl.show()
+        self._va_verdict_lbl.setText("분석 중…")
+        self._va_verdict_lbl.setStyleSheet(
+            "font-size:48px; font-weight:bold; color:#888;")
+        self._va_reason_text.setText("영상을 분석하고 있습니다. 잠시만 기다려 주세요…")
+        self._va_apply_btn.setEnabled(False)
+        self._va_change_lbl.setText("—")
+        self._va_new_sens_lbl.setText("—")
+
+        self._worker = VideoAnalysisWorker(
+            self._video_path, api_key, game_name, current_sens, dpi)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_result)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
+
+    def _on_progress(self, pct: int, msg: str):
+        self._va_progress.setValue(pct)
+        self._va_status_lbl.setText(msg)
+
+    def _on_result(self, result: dict):
+        self._result = result
+        self._va_start_btn.setEnabled(True)
+        self._va_progress.hide()
+        self._va_status_lbl.hide()
+
+        verdict = result.get("verdict", "알 수 없음")
+        conf    = result.get("confidence", 0)
+        reason  = result.get("reasoning", "")
+        change  = result.get("suggested_change", 0)
+        frames  = result.get("frames_analyzed", 0)
+        dur     = result.get("video_duration", 0)
+        over    = result.get("overshoot_count", 0)
+        under   = result.get("undershoot_count", 0)
+
+        color_map = {"빠름": "#c0392b", "느림": "#2980b9", "적정": "#27ae60"}
+        color = color_map.get(verdict, "#888888")
+        self._va_verdict_lbl.setText(verdict)
+        self._va_verdict_lbl.setStyleSheet(
+            f"font-size:48px; font-weight:bold; color:{color};")
+
+        self._va_conf_lbl.setText(
+            f"신뢰도: {conf}%  |  오버슈팅: {over}회  /  언더슈팅: {under}회")
+        self._va_info_lbl.setText(
+            f"분석 프레임: {frames}개  |  영상 길이: {dur}초")
+        self._va_reason_text.setText(reason or "(이유 없음)")
+
+        current_sens = self._va_sens_spin.value()
+        _, _, lo, hi, step = GAME_PRESETS[self._va_game_combo.currentIndex()]
+        new_sens = current_sens * (1 + change / 100.0)
+        new_sens = max(lo, min(hi, round(new_sens / step) * step))
+        self._result["new_sens"] = new_sens
+
+        sign = "+" if change >= 0 else ""
+        self._va_change_lbl.setText(f"{sign}{change}%")
+        dec = 3 if step < 0.01 else 2 if step < 1 else 0
+        self._va_new_sens_lbl.setText(f"{new_sens:.{dec}f}")
+
+        if abs(change) > 0 and verdict not in ("알 수 없음",):
+            self._va_apply_btn.setEnabled(True)
+
+    def _on_error(self, msg: str):
+        self._va_start_btn.setEnabled(True)
+        self._va_progress.hide()
+        self._va_status_lbl.hide()
+        self._va_verdict_lbl.setText("오류")
+        self._va_verdict_lbl.setStyleSheet(
+            "font-size:48px; font-weight:bold; color:#c0392b;")
+        self._va_reason_text.setText(f"분석 중 오류가 발생했습니다:\n{msg}")
+
+    def _apply_suggested(self):
+        new_sens = self._result.get("new_sens")
+        if new_sens is not None and self.on_apply:
+            self.on_apply(new_sens, self._va_game_combo.currentIndex(),
+                          self._va_dpi_spin.value())
+
+    # ── 테마 적용 ────────────────────────────
+    def apply_theme(self):
+        p = _p()
+        self._va_left.setStyleSheet(
+            f"background:{p['bg2']}; border-radius:6px;")
+        self._va_right.setStyleSheet(
+            f"background:{p['bg2']}; border-radius:6px;")
+        self._va_title.setStyleSheet(
+            f"font-size:15px; font-weight:bold; color:{p['txt']};")
+        self._va_res_title.setStyleSheet(
+            f"font-size:14px; font-weight:bold; color:{p['txt']};")
+        self._va_reason_lbl.setStyleSheet(
+            f"font-size:12px; font-weight:bold; color:{p['txt']};")
+        self._va_sugg_lbl.setStyleSheet(
+            f"font-size:12px; font-weight:bold; color:{p['txt']};")
+        for lbl in (self._va_api_lbl, self._va_file_lbl,
+                    self._va_game_lbl, self._va_sens_lbl, self._va_dpi_lbl):
+            lbl.setStyleSheet(f"font-size:11px; color:{p['txt4']};")
+        self._va_conf_lbl.setStyleSheet(f"font-size:13px; color:{p['txt3']};")
+        self._va_info_lbl.setStyleSheet(f"font-size:11px; color:{p['txt4']};")
+        self._va_arrow_lbl.setStyleSheet(f"font-size:18px; color:{p['txt3']};")
+        self._va_reason_text.setStyleSheet(
+            f"font-size:13px; color:{p['txt2']}; padding:8px 0;")
+        self._va_status_lbl.setStyleSheet(f"font-size:11px; color:{p['txt4']};")
+        self._va_game_combo.setStyleSheet(_combo_style(14))
+        self._va_sens_spin.setStyleSheet(_spinbox_style(14))
+        self._va_dpi_spin.setStyleSheet(_spinbox_style(14))
+        self._va_api_edit.setStyleSheet(
+            f"border:1px solid {p['border']}; border-radius:4px;"
+            f" padding:4px 6px; font-size:12px;"
+            f" background:{p['bg3']}; color:{p['txt']};")
+
+
+# ────────────────────────────────────────────
 #  메인 윈도우
 # ────────────────────────────────────────────
 class MainWindow(QMainWindow):
@@ -1689,6 +2186,10 @@ class MainWindow(QMainWindow):
         self._sens_calc.on_apply = self._apply_from_calc
         self._body_stack.addWidget(self._sens_calc)  # index 2
 
+        # 페이지 3: 영상 감도 분석
+        self._video_analysis = VideoAnalysisWidget()
+        self._video_analysis.on_apply = self._apply_from_video_analysis
+        self._body_stack.addWidget(self._video_analysis)  # index 3
 
         root.addWidget(self._body_stack, stretch=1)
         root.addWidget(self._make_bottom_bar())
@@ -1809,6 +2310,9 @@ class MainWindow(QMainWindow):
         # ── 감도 계산기 ──
         self._sens_calc.apply_theme()
 
+        # ── 영상 감도 분석 ──
+        self._video_analysis.apply_theme()
+
     def _make_topbar(self):
         self._topbar = QFrame()
         self._topbar.setFixedHeight(44)
@@ -1827,7 +2331,7 @@ class MainWindow(QMainWindow):
         mode_lay.setContentsMargins(0, 0, 0, 0)
         mode_lay.setSpacing(4)
 
-        modes = ["트래킹 1", "트래킹 2", "그리드샷", "감도 계산기"]
+        modes = ["트래킹 1", "트래킹 2", "그리드샷", "감도 계산기", "영상 분석"]
         for i, name in enumerate(modes):
             btn = QPushButton(name)
             btn.setFixedHeight(28)
@@ -1886,6 +2390,9 @@ class MainWindow(QMainWindow):
             self._info_bar.hide()
             # 메인 DPI를 계산기에 동기화
             self._sens_calc.sync_dpi(self._dpi_spinbox.value())
+        elif selected == "영상 분석":
+            self._body_stack.setCurrentIndex(3)
+            self._info_bar.hide()
 
     def _stop_all_sessions(self):
         # 모든 세션 중지
@@ -2946,6 +3453,17 @@ class MainWindow(QMainWindow):
         self._dpi_spinbox.setValue(dpi)
 
         # 감도 계산기 → 트래킹 화면으로 전환
+        self._on_mode_changed("트래킹 1")
+
+    def _apply_from_video_analysis(self, sens: float, game_idx: int, dpi: float):
+        # 영상 분석 탭 → 권장 감도를 메인 설정에 반영 후 트래킹 화면으로 전환
+        self._game_combo.blockSignals(True)
+        self._game_combo.setCurrentIndex(game_idx)
+        self._game_combo.blockSignals(False)
+        self._on_game_changed(game_idx)
+        clamped = max(self._spinbox.minimum(), min(self._spinbox.maximum(), sens))
+        self._spinbox.setValue(clamped)
+        self._dpi_spinbox.setValue(dpi)
         self._on_mode_changed("트래킹 1")
 
     def _add_sens_log(self, verdict: str, before: float, after: float, arrow: str):
